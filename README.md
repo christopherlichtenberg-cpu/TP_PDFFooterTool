@@ -75,12 +75,14 @@ builds from the spec, and then *verifies the frozen result before publishing
 it* — `AffStamp-cli.exe selftest` must pass and `AffStamp.exe` must stay
 running when launched, so a broken build cannot ship.
 
-Download `AffStamp-1.2.0-win64.zip` from the
-[Actions run](../../actions/workflows/build-windows.yml) (Artifacts, at the
-bottom of the summary page) or from
-[Releases](../../releases). Unzip it anywhere on the machine with Acrobat and
-double-click `AffStamp.exe` — nothing is installed and no admin rights are
-needed.
+**[Download the latest release](../../releases/latest)** — the
+`AffStamp-1.2.0-win64.zip` asset. Unzip it anywhere on the machine with
+Acrobat and double-click `AffStamp.exe`; nothing is installed and no admin
+rights are needed. Read `START HERE.txt` first.
+
+Every push also leaves the same zip as an artifact on its
+[Actions run](../../actions/workflows/build-windows.yml), at the bottom of the
+summary page, if you want a build from a specific commit.
 
 PyInstaller does not cross-compile, which is why this cannot be produced on a
 Linux or macOS box: the executables have to be built on Windows.
