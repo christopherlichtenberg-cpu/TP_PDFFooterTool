@@ -1,0 +1,19 @@
+# Build output
+build/
+dist/
+*.spec.bak
+__pycache__/
+*.py[cod]
+
+# Packaged releases
+AffStamp-*.zip
+SHA256SUMS.txt
+
+# Working files - never commit case material
+*_SIGNED.pdf
+*_fixed.pdf
+*_RULER.pdf
+*_links.txt
+*.manifest.json
+TEST.pdf
+GHOST.pdf

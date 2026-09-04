@@ -1,0 +1,29 @@
+# UTF-8
+#
+# Windows VS_VERSION_INFO resource for both executables.
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(1, 2, 0, 0),
+    prodvers=(1, 2, 0, 0),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo(
+      [
+      StringTable(
+        u'040904B0',
+        [StringStruct(u'FileDescription', u'AffStamp - scanned signature overlay for hyperlinked PDFs'),
+         StringStruct(u'FileVersion', u'1.2.0'),
+         StringStruct(u'InternalName', u'AffStamp'),
+         StringStruct(u'OriginalFilename', u'AffStamp.exe'),
+         StringStruct(u'ProductName', u'AffStamp'),
+         StringStruct(u'ProductVersion', u'1.2.0')])
+      ]),
+    VarFileInfo([VarStruct(u'Translation', [1033, 1200])])
+  ]
+)

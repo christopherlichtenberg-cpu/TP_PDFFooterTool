@@ -1,0 +1,50 @@
+AffStamp 1.2.0
+==============
+
+Overlays the wet-ink signatures from a scanned affidavit onto the
+hyperlinked PDF, without disturbing the hyperlinks.
+
+
+HOW TO USE THIS FOLDER
+----------------------
+
+1. Copy this whole AffStamp folder to the machine that has Acrobat.
+   Anywhere will do - Desktop, Documents, a USB stick. It does not
+   install anything and does not need administrator rights.
+
+2. Double-click AffStamp.exe.  A window opens.
+
+3. FIRST TIME, click "Self-test". It should finish with
+   "SELFTEST PASSED" in the Output pane. That proves the tool runs
+   on this machine before you touch the real files.
+
+4. Choose your two PDFs with the Browse buttons at the top, then
+   work left to right through the numbered buttons. Everything the
+   tool writes goes to the Output folder shown at the top, and your
+   files and settings are remembered next time you open it.
+
+5. Read RUNBOOK.md for the full step-by-step process. It is a text
+   file - open it with Notepad, or any browser.
+
+
+THE OTHER EXE
+-------------
+
+AffStamp-cli.exe is the same tool with a console instead of a
+window. Run it with no arguments for a text menu, or use it for
+command-line options the window does not expose. You only need it
+if the ink extraction needs tuning.
+
+
+REQUIREMENTS
+------------
+
+64-bit Windows 10 (version 1607 or later) or Windows 11.
+Nothing else. No Python, no installer, no admin rights.
+
+If AffStamp.exe will not start, or the self-test fails, the machine
+is probably older than that. Say so and a build for older Windows
+can be made instead.
+
+DO NOT separate the .exe files from the _internal folder next to
+them. They must stay together in this folder.
