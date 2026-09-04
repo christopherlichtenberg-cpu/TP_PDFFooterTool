@@ -3,15 +3,19 @@
 pdflinkcheck - are a PDF's hyperlinks relative, and will they open in the PDF
 viewer rather than a browser?
 
-    py pdflinkcheck.py bundle.pdf
-    py pdflinkcheck.py *.pdf
-    py pdflinkcheck.py C:\\Affidavit           (every PDF in the folder)
-    py pdflinkcheck.py bundle.pdf --fix        (rewrite them -> _fixed.pdf)
+    PDFLinkCheck.exe bundle.pdf
+    PDFLinkCheck.exe *.pdf
+    PDFLinkCheck.exe C:\\Affidavit           (every PDF in the folder)
+    PDFLinkCheck.exe bundle.pdf --fix        (rewrite them -> _fixed.pdf)
+
+Or just double-click it and type a path, or drag a PDF onto the .exe.
 
 Exit code 0 if everything passed, 1 if anything failed, 2 on a bad argument,
-so it can gate a process:  py pdflinkcheck.py final.pdf || echo STOP
+so it can gate a batch file:
 
-One file, needs only PyMuPDF. Copy it wherever you need it.
+    PDFLinkCheck.exe final.pdf --no-pause || echo STOP
+
+One source file, needs only PyMuPDF, and ships as a self-contained .exe.
 
 
 WHY THE ACTION TYPE MATTERS
@@ -49,6 +53,8 @@ try:
     import pymupdf as fitz
 except ImportError:                                     # older wheels
     import fitz                                         # type: ignore
+
+VERSION = "1.0.0"
 
 WEB = re.compile(r"^(https?|mailto|ftp|tel):", re.I)
 DRIVE = re.compile(r"^/?[A-Za-z]:[\\/]")                # C:\x   /C:/x
@@ -284,9 +290,16 @@ def fix(path, args):
     doc.close()
     print("  rewrote %d link(s) as relative /GoToR  ->  %s"
           % (changed, os.path.basename(out)))
-    print("  now re-check it:  py %s \"%s\""
-          % (os.path.basename(__file__), os.path.basename(out)))
+    print("  now re-check it:  %s \"%s\""
+          % (prog_name(), os.path.basename(out)))
     return changed
+
+
+def prog_name():
+    """How to invoke this program, as the user actually has it."""
+    if getattr(sys, "frozen", False):
+        return os.path.basename(sys.executable)
+    return "py " + os.path.basename(__file__)
 
 
 def collect(paths):
@@ -314,6 +327,11 @@ def main(argv=None):
     ap.add_argument("--fix", action="store_true",
                     help="rewrite failing links as relative /GoToR, into "
                          "<name>_fixed.pdf")
+    ap.add_argument("--no-pause", action="store_true",
+                    help="do not wait for a keypress at the end (use this "
+                         "when calling it from a batch file)")
+    ap.add_argument("--version", action="version",
+                    version="PDFLinkCheck %s" % VERSION)
     a = ap.parse_args(argv)
 
     files = collect(a.pdfs)
@@ -339,5 +357,46 @@ def main(argv=None):
     return 1 if total_fail else 0
 
 
+def interactive():
+    """No arguments: ask for a path. This is what double-clicking gives you."""
+    print("=" * 70)
+    print("PDFLinkCheck %s" % VERSION)
+    print("=" * 70)
+    print("Checks that a PDF\'s hyperlinks are relative, and that they open in")
+    print("the PDF viewer rather than a browser.")
+    print("")
+    print("Give it a PDF, or a folder of them. You can also drag a PDF straight")
+    print("onto the .exe, or paste a path below.")
+    while True:
+        print("")
+        try:
+            raw = input("PDF or folder (blank to quit): ").strip()
+        except EOFError:
+            return 0
+        raw = raw.strip('"').strip("'")
+        if not raw:
+            return 0
+        print("")
+        code = main([raw])
+        if code == 1:
+            try:
+                reply = input("\nRewrite the failing links as relative "
+                              "/GoToR? [y/N]: ").strip().lower()
+            except EOFError:
+                reply = ""
+            if reply.startswith("y"):
+                print("")
+                main([raw, "--fix"])
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    _argv = sys.argv[1:]
+    _code = interactive() if not _argv else main(_argv)
+    # A double-clicked or drag-and-dropped .exe gets its own console window,
+    # which would vanish with the results still in it.
+    if getattr(sys, "frozen", False) and "--no-pause" not in _argv:
+        try:
+            input("\nPress Enter to close...")
+        except EOFError:
+            pass
+    sys.exit(_code)
