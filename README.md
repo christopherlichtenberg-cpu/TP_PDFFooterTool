@@ -66,7 +66,26 @@ Python 3.8+, two dependencies: PyMuPDF and Pillow. No numpy — Pillow's BOX
 resize gives the row and column profiles the analysis needs, and dropping
 numpy takes about 45 MB off the frozen build.
 
-## Building the executables
+## Getting the executables
+
+**The built `.exe` files come from CI.** Every push runs
+[`.github/workflows/build-windows.yml`](.github/workflows/build-windows.yml) on
+a Windows runner, which installs the dependencies, runs both test suites,
+builds from the spec, and then *verifies the frozen result before publishing
+it* — `AffStamp-cli.exe selftest` must pass and `AffStamp.exe` must stay
+running when launched, so a broken build cannot ship.
+
+Download `AffStamp-1.2.0-win64.zip` from the
+[Actions run](../../actions/workflows/build-windows.yml) (Artifacts, at the
+bottom of the summary page) or from
+[Releases](../../releases). Unzip it anywhere on the machine with Acrobat and
+double-click `AffStamp.exe` — nothing is installed and no admin rights are
+needed.
+
+PyInstaller does not cross-compile, which is why this cannot be produced on a
+Linux or macOS box: the executables have to be built on Windows.
+
+## Building the executables yourself
 
 On a Windows machine of the **same bitness as the target**:
 
