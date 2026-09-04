@@ -41,6 +41,28 @@ Each run writes the composite, a link report, and a manifest recording the
 settings, the SHA-256 of both inputs and the output, which pages were stamped,
 and any links removed with a replaced final page.
 
+## pdflinkcheck.py — standalone link auditor
+
+Separate one-file tool, not part of the AffStamp build. Checks that a PDF's
+hyperlinks are **relative** and carry a **`/GoToR`** action, so exhibits open
+in the PDF viewer rather than a browser.
+
+```
+py pdflinkcheck.py bundle.pdf            # check
+py pdflinkcheck.py C:\Affidavit           # check every PDF in a folder
+py pdflinkcheck.py bundle.pdf --fix       # rewrite -> bundle_fixed.pdf
+```
+
+Exit code 1 if anything failed, so it can gate a process.
+
+It reads the raw annotation objects rather than `page.get_links()`, because
+PyMuPDF reports a `/Launch` action as kind 5 (`GOTOR`) — the same value it
+reports for a genuine `/GoToR`. A checker built on `get_links()` passes every
+`/Launch` link silently, which is the exact fault this tool exists to catch.
+
+Note that `affstamp links --repair` currently writes `/Launch`, so its output
+will fail this check until the two are reconciled.
+
 ## Files
 
 | | |
