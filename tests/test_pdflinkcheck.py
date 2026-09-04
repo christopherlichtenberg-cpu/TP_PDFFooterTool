@@ -61,6 +61,28 @@ def make_bundle(path):
     doc.close()
 
 
+def make_exhibits(work, miscase=False, skip=()):
+    """The files the fixed bundle's links point at."""
+    ex = os.path.join(work, "Exhibits")
+    os.makedirs(ex, exist_ok=True)
+    beside = ["DOC-001.pdf", "DOC-006.pdf"]
+    inside = ["DOC-002.pdf", "DOC-003.pdf", "DOC-010.pdf", "DOC-011.pdf",
+              "DOC-012.pdf"]
+    for name in beside:
+        if name in skip:
+            continue
+        doc = fitz.open(); doc.new_page()
+        doc.save(os.path.join(work, name)); doc.close()
+    for name in inside:
+        if name in skip:
+            continue
+        out = name
+        if miscase and name == "DOC-012.pdf":
+            out = "doc-012.PDF"
+        doc = fitz.open(); doc.new_page()
+        doc.save(os.path.join(ex, out)); doc.close()
+
+
 def raw_actions(path):
     doc = fitz.open(path)
     out = []
@@ -152,6 +174,8 @@ def test_cli(work):
     section("command line")
     bundle = os.path.join(work, "bundle.pdf")
     check("failing bundle exits 1", P.main([bundle]) == 1)
+    check("resolution can be turned off",
+          P.main([bundle, "--no-resolve"]) == 1)
     check("--allow-launch still fails the absolute and UNC paths",
           P.main([bundle, "--allow-launch"]) == 1)
 
@@ -189,7 +213,68 @@ def test_fix(work):
           "DOC-006.pdf" in targets)
     check("the web link was not touched",
           "https://www.legislation.gov.au/" in targets)
-    check("the fixed file now passes", P.main([fixed]) == 0)
+    check("destination is /Fit, not XYZ 0 0 0 (which opens at the page foot)",
+          all("/Fit" in a for a in goto_r_actions(fixed)), goto_r_actions(fixed))
+
+    check("without the exhibits present, every target is reported missing",
+          P.main([fixed]) == 1)
+    make_exhibits(work)
+    check("with the exhibits present, the fixed file passes",
+          P.main([fixed]) == 0)
+
+
+def goto_r_actions(path):
+    doc = fitz.open(path)
+    out = []
+    for page in doc:
+        for xref, atype, _ in page.annot_xrefs():
+            if atype != fitz.PDF_ANNOT_LINK:
+                continue
+            blob = doc.xref_object(xref, compressed=True)
+            if "/GoToR" in blob:
+                out.append(blob)
+    doc.close()
+    return out
+
+
+def test_resolution(work):
+    section("does the target actually exist?")
+    room = os.path.join(work, "resolve")
+    os.makedirs(os.path.join(room, "Exhibits"), exist_ok=True)
+    doc = fitz.open(); doc.new_page()
+    doc.save(os.path.join(room, "Exhibits", "DOC-001.pdf")); doc.close()
+
+    check("exact match resolves",
+          P.resolve_target("Exhibits/DOC-001.pdf", room)[0] == "found")
+    check("wrong case is caught even on a case-insensitive filesystem",
+          P.resolve_target("exhibits/doc-001.PDF", room)[0] == "case",
+          P.resolve_target("exhibits/doc-001.PDF", room))
+    check("the real spelling is reported back",
+          P.resolve_target("exhibits/doc-001.PDF", room)[1]
+          == "Exhibits/DOC-001.pdf",
+          P.resolve_target("exhibits/doc-001.PDF", room)[1])
+    check("a missing file is caught",
+          P.resolve_target("Exhibits/DOC-999.pdf", room)[0] == "missing")
+    check("a missing folder is caught",
+          P.resolve_target("Nope/DOC-001.pdf", room)[0] == "missing")
+    check("leading ./ still resolves",
+          P.resolve_target("./Exhibits/DOC-001.pdf", room)[0] == "found")
+    check("web links are skipped",
+          P.resolve_target("https://example.com/a.pdf", room)[0] == "skip")
+    check("absolute paths are skipped",
+          P.resolve_target("C:/x/y.pdf", room)[0] == "skip")
+
+    # a bundle whose only fault is a miscased target must fail
+    bundle = os.path.join(room, "b.pdf")
+    doc = fitz.open(); doc.new_page(width=200, height=200)
+    doc[0].insert_link({"kind": fitz.LINK_GOTOR,
+                        "from": fitz.Rect(10, 10, 100, 30),
+                        "file": "exhibits/DOC-001.pdf", "page": 0,
+                        "to": fitz.Point(0, 0)})
+    doc.save(bundle); doc.close()
+    check("a well-formed link to a miscased file still fails",
+          P.main([bundle]) == 1)
+    check("--no-resolve lets it pass", P.main([bundle, "--no-resolve"]) == 0)
 
 
 def main():
@@ -202,6 +287,7 @@ def main():
         test_verdicts(work)
         test_cli(work)
         test_fix(work)
+        test_resolution(work)
     finally:
         shutil.rmtree(work, ignore_errors=True)
 

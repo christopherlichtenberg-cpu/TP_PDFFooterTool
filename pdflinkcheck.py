@@ -54,7 +54,7 @@ try:
 except ImportError:                                     # older wheels
     import fitz                                         # type: ignore
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 WEB = re.compile(r"^(https?|mailto|ftp|tel):", re.I)
 DRIVE = re.compile(r"^/?[A-Za-z]:[\\/]")                # C:\x   /C:/x
@@ -137,6 +137,9 @@ def classify(link, allow_launch=False):
         problems.append("ABSOLUTE path - breaks on every other machine")
     elif "\\" in target:
         problems.append("backslashes - use forward slashes for portability")
+    elif target.startswith("./"):
+        problems.append("leading ./ - not part of the PDF file-specification "
+                        "grammar, and some macOS viewers reject it")
 
     if action == "/GoToR":
         pass                                            # the one we want
@@ -152,6 +155,55 @@ def classify(link, allow_launch=False):
     if problems:
         return "fail", "; ".join(problems)
     return "ok", "relative /GoToR - opens in the PDF viewer"
+
+
+def resolve_target(target, base_dir):
+    """Does this relative target actually exist next to the PDF?
+
+    Returns (status, detail):
+        found    it is there, spelled exactly as the link says
+        case     it is there under a DIFFERENT CASE - works on Windows and on
+                 a normal Mac volume, fails on a case-sensitive volume, a
+                 network share, Linux, and many document management systems
+        missing  nothing of that name is there at all
+        skip     not a local relative path, so there is nothing to resolve
+
+    The directory is listed rather than trusting os.path.isfile, because on a
+    case-insensitive filesystem isfile() happily returns True for the wrong
+    spelling - which is exactly how a bundle passes on Windows and then fails
+    somewhere else.
+    """
+    if not target or WEB.match(target) or is_absolute(target):
+        return "skip", ""
+
+    parts = [p for p in target.replace("\\", "/").split("/") if p not in ("", ".")]
+    if not parts:
+        return "skip", ""
+
+    cur, actual, exact = base_dir, [], True
+    for part in parts:
+        if part == "..":
+            cur = os.path.dirname(cur)
+            actual.append("..")
+            continue
+        try:
+            entries = os.listdir(cur)
+        except OSError:
+            return "missing", posixpath.join(base_dir, "/".join(parts))
+        if part in entries:
+            match = part
+        else:
+            same = [e for e in entries if e.lower() == part.lower()]
+            if not same:
+                return "missing", posixpath.join(base_dir, "/".join(parts))
+            match = same[0]
+            exact = False
+        actual.append(match)
+        cur = os.path.join(cur, match)
+
+    if not os.path.isfile(cur):
+        return "missing", cur
+    return ("found", "") if exact else ("case", "/".join(actual))
 
 
 def relative_to(target, base_dir):
@@ -211,11 +263,30 @@ def check(path, args):
         doc.close()
         return 0, 1
 
+    base_dir = os.path.dirname(os.path.abspath(path)) or os.getcwd()
     groups, total = {}, 0
     for page in doc:
         for link in read_links(doc, page):
             total += 1
             verdict, reason = classify(link, args.allow_launch)
+
+            # A link can be perfectly formed and still not open, because
+            # nothing of that name is sitting where it points.
+            if not args.no_resolve:
+                status, detail = resolve_target(link["target"], base_dir)
+                extra = ""
+                if status == "missing":
+                    extra = ("TARGET NOT FOUND beside this PDF - nothing of "
+                             "that name is there, so the link cannot open")
+                elif status == "case":
+                    extra = ("CASE MISMATCH - on disk it is '%s'. Windows and "
+                             "a stock Mac volume forgive this; a case-"
+                             "sensitive volume, a network share or a document "
+                             "management system will not" % detail)
+                if extra:
+                    reason = extra if verdict == "ok" else extra + "; " + reason
+                    verdict = "fail"
+
             key = (verdict, link["action"], link["target"], reason)
             groups.setdefault(key, []).append(link["page"])
 
@@ -270,6 +341,8 @@ def fix(path, args):
             if not target or WEB.match(target):
                 continue
             rel = relative_to(target, base_dir)
+            while rel.startswith("./"):
+                rel = rel[2:]
             try:
                 page.delete_link(link)
                 page.insert_link({"kind": fitz.LINK_GOTOR, "from": link["from"],
@@ -284,6 +357,19 @@ def fix(path, args):
         print("  nothing that --fix can repair")
         doc.close()
         return 0
+
+    # PyMuPDF writes /D[0/XYZ 0 0 0]. A top coordinate of 0 is the BOTTOM of
+    # the page in PDF space, so the exhibit opens scrolled to the foot of
+    # page 1, and a zoom of 0 is meaningless. /Fit shows the whole page.
+    for page in doc:
+        for xref, atype, _ in page.annot_xrefs():
+            if atype != fitz.PDF_ANNOT_LINK:
+                continue
+            try:
+                if "/GoToR" in doc.xref_object(xref, compressed=True):
+                    doc.xref_set_key(xref, "A/D", "[0/Fit]")
+            except Exception:
+                pass
 
     out = os.path.splitext(path)[0] + "_fixed.pdf"
     doc.save(out, garbage=3, deflate=True)
@@ -327,6 +413,9 @@ def main(argv=None):
     ap.add_argument("--fix", action="store_true",
                     help="rewrite failing links as relative /GoToR, into "
                          "<name>_fixed.pdf")
+    ap.add_argument("--no-resolve", action="store_true",
+                    help="do not check that each target actually exists next "
+                         "to the PDF (use when the exhibits are not to hand)")
     ap.add_argument("--no-pause", action="store_true",
                     help="do not wait for a keypress at the end (use this "
                          "when calling it from a batch file)")

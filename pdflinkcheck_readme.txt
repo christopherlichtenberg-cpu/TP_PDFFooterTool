@@ -1,4 +1,4 @@
-PDFLinkCheck 1.0.0
+PDFLinkCheck 1.1.0
 ==================
 
 Checks that the hyperlinks in a PDF are RELATIVE, and that they open in the
@@ -43,6 +43,23 @@ The fix never overwrites your file. It writes a new one alongside it, named
 WHAT IT IS LOOKING FOR
 ----------------------
 
+0. THAT THE TARGET IS ACTUALLY THERE. A link can be perfectly formed and
+   still not open, because nothing of that name is sitting where it points.
+   The tool resolves every relative link against the folder the PDF is in
+   and reports:
+
+     TARGET NOT FOUND   nothing of that name is there
+     CASE MISMATCH      it is there, but spelled with different capitals
+
+   Case matters more than it looks. Windows ignores capitalisation, and so
+   does a normal Mac disk - but a case-sensitive volume, a network share,
+   a SharePoint or iManage library, and Linux do not. A bundle that works
+   perfectly on the machine that built it can fail everywhere else for this
+   reason alone, and the error you get is just "cannot open the file".
+
+   Use --no-resolve to skip this, if you are checking a PDF away from its
+   exhibits.
+
 1. RELATIVE PATHS. A link to "Exhibits\DOC-001.pdf" travels with the bundle.
    A link to "C:\Users\chris\Desktop\Exhibits\DOC-001.pdf" works only on the
    machine it was made on. Word writes the absolute kind whenever the
@@ -77,6 +94,49 @@ a gate in a batch file:
 
 Use --no-pause whenever you call it from a script, otherwise it waits for
 a keypress at the end.
+
+
+IF THE LINKS FAIL ON A MAC
+--------------------------
+
+Symptom: clicking a link says it cannot open the file, or mentions
+permissions - but opening that same file by hand works perfectly.
+
+Run this tool on the bundle first. If it reports TARGET NOT FOUND or CASE
+MISMATCH, that is your answer and it is fixable. If it says PASS, the file
+is fine and the problem is on the Mac. In rough order of likelihood:
+
+1. QUARANTINE. If the bundle arrived by download, email, AirDrop or a USB
+   stick, macOS tags every file with a quarantine flag, and Acrobat will
+   not follow a link into a quarantined file. Opening by hand still works,
+   which is exactly the symptom. In Terminal:
+
+       xattr -dr com.apple.quarantine /path/to/the/bundle/folder
+
+2. ICLOUD DRIVE. If the folder is in iCloud Drive with "Optimise Mac
+   Storage" on, the exhibit may not actually be on the disk - only a
+   placeholder. Opening by hand downloads it; following a link does not.
+   Move the bundle to a real local folder, or right-click the folder and
+   choose "Download Now".
+
+3. FILES AND FOLDERS PERMISSION. System Settings > Privacy & Security >
+   Files and Folders, and give Acrobat access to the folder the bundle is
+   in (Desktop, Documents and Downloads each need granting separately).
+   Opening by hand goes through the file dialog, which grants access for
+   that one file - which is why manual opening works and links do not.
+
+4. ENHANCED SECURITY IN ACROBAT. Acrobat > Settings > Security (Enhanced).
+   Either add the bundle folder under "Add File Path" in Privileged
+   Locations, or untick "Enable Enhanced Security" while you work with it.
+
+5. PREVIEW INSTEAD OF ACROBAT. Apple's Preview does not properly support
+   links from one PDF to another. If the recipient opens the bundle in
+   Preview, the links will not work no matter how the file is built. Set
+   Acrobat as the default PDF application, or tell the recipient to open
+   the bundle in Acrobat.
+
+Only the first two are things you can fix from your side before sending.
+Worth doing both before the bundle goes anywhere.
 
 
 ONE THING TO KNOW
