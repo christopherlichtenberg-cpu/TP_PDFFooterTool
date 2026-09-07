@@ -277,6 +277,61 @@ def test_resolution(work):
     check("--no-resolve lets it pass", P.main([bundle, "--no-resolve"]) == 0)
 
 
+def actions_of(path):
+    doc = fitz.open(path)
+    out = []
+    for page in doc:
+        for link in P.read_links(doc, page):
+            out.append((link["action"], link["target"]))
+    doc.close()
+    return out
+
+
+def test_open_in(work):
+    section("--open-in policies")
+    for mode in ("viewer", "browser", "any"):
+        room = os.path.join(work, "mode_" + mode)
+        os.makedirs(room, exist_ok=True)
+        bundle = os.path.join(room, "b.pdf")
+        make_bundle(bundle)
+        make_exhibits(room)
+
+        P.main([bundle, "--fix", "--open-in", mode, "--no-pause"])
+        fixed = os.path.join(room, "b_fixed.pdf")
+        acts = actions_of(fixed)
+        local = [(a, t) for a, t in acts
+                 if t and not t.startswith("http") and a != "/GoTo"]
+
+        if mode == "viewer":
+            check("viewer: every local link is /GoToR",
+                  all(a == "/GoToR" for a, _ in local), set(a for a, _ in local))
+        elif mode == "browser":
+            check("browser: every local link is /URI",
+                  all(a == "/URI" for a, _ in local), set(a for a, _ in local))
+        else:
+            kinds = dict((t, a) for a, t in local)
+            check("any: a /Launch link stayed /Launch",
+                  kinds.get("Exhibits/DOC-002.pdf") == "/Launch", kinds)
+            check("any: a /GoToR link stayed /GoToR",
+                  kinds.get("Exhibits/DOC-003.pdf") == "/GoToR", kinds)
+            check("any: the broken absolute path was still repaired",
+                  "DOC-001.pdf" in kinds, kinds)
+
+        check("%s: the result passes its own policy" % mode,
+              P.main([fixed, "--open-in", mode, "--no-pause"]) == 0)
+
+    # a viewer-style bundle must FAIL a browser policy, and the reverse
+    viewer_pdf = os.path.join(work, "mode_viewer", "b_fixed.pdf")
+    browser_pdf = os.path.join(work, "mode_browser", "b_fixed.pdf")
+    check("a /GoToR bundle fails a browser policy",
+          P.main([viewer_pdf, "--open-in", "browser", "--no-pause"]) == 1)
+    check("a /URI bundle fails a viewer policy",
+          P.main([browser_pdf, "--open-in", "viewer", "--no-pause"]) == 1)
+    check("either passes under 'any'",
+          P.main([viewer_pdf, "--open-in", "any", "--no-pause"]) == 0
+          and P.main([browser_pdf, "--open-in", "any", "--no-pause"]) == 0)
+
+
 def main():
     print("PDFLinkCheck %s tests" % P.VERSION)
     work = tempfile.mkdtemp(prefix="pdflinkcheck_tests_")
@@ -288,6 +343,7 @@ def main():
         test_cli(work)
         test_fix(work)
         test_resolution(work)
+        test_open_in(work)
     finally:
         shutil.rmtree(work, ignore_errors=True)
 

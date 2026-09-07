@@ -1,4 +1,4 @@
-PDFLinkCheck 1.1.0
+PDFLinkCheck 1.2.0
 ==================
 
 Checks that the hyperlinks in a PDF are RELATIVE, and that they open in the
@@ -76,6 +76,34 @@ WHAT IT IS LOOKING FOR
      /URI      always goes to the browser. Wrong for a local exhibit.
 
    --fix rewrites both of the bad ones as relative /GoToR.
+
+
+3. WHICHEVER BEHAVIOUR YOU HAVE CHOSEN. Use --open-in to say how the links
+   in this bundle are meant to behave. The tool then checks against that
+   choice, and --fix converts to it.
+
+     --open-in viewer    (the default) every local link must be /GoToR, so
+                         exhibits open in the PDF viewer. Best for a bundle
+                         read in Acrobat.
+
+     --open-in browser   every local link must be /URI, so exhibits are
+                         handed to the default browser. Worth considering if
+                         your recipients are on Macs or tablets, where the
+                         browser is more reliable than the PDF viewer.
+
+     --open-in any       leave the action types exactly as they are, and
+                         only check and repair the paths. Use this when the
+                         bundle already behaves the way you want and you
+                         only care that the links are relative and resolve.
+
+   Examples:
+
+       PDFLinkCheck.exe bundle.pdf --open-in browser
+       PDFLinkCheck.exe bundle.pdf --fix --open-in browser
+       PDFLinkCheck.exe bundle.pdf --fix --open-in any
+
+   A bundle built for one policy will fail a check under another, which is
+   the point - it tells you the bundle is not what you thought it was.
 
 
 READING THE OUTPUT

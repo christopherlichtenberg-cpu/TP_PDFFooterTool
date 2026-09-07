@@ -24,7 +24,7 @@ permissions:
   contents: write
 
 env:
-  VERSION: "1.1.0"
+  VERSION: "1.2.0"
 
 jobs:
   build:
@@ -116,7 +116,19 @@ jobs:
             exit 1
           }
 
-          Write-Host "frozen build verified: detects, fixes, and passes the fixed copy"
+          # every --open-in policy must round-trip through the frozen exe
+          foreach ($mode in @("viewer", "browser", "any")) {
+            Remove-Item -Force -ErrorAction SilentlyContinue policy.pdf, policy_fixed.pdf
+            Copy-Item ci_fixture.pdf policy.pdf
+            & $exe policy.pdf --fix --open-in $mode --no-pause | Out-Null
+            & $exe policy_fixed.pdf --open-in $mode --no-pause
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "--open-in $mode did not round-trip, got $LASTEXITCODE"
+              exit 1
+            }
+          }
+
+          Write-Host "frozen build verified: detects, fixes, passes the fixed copy, and all three --open-in policies round-trip"
           exit 0
 
       - name: Stage the package

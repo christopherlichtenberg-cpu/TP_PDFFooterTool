@@ -54,7 +54,7 @@ try:
 except ImportError:                                     # older wheels
     import fitz                                         # type: ignore
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 WEB = re.compile(r"^(https?|mailto|ftp|tel):", re.I)
 DRIVE = re.compile(r"^/?[A-Za-z]:[\\/]")                # C:\x   /C:/x
@@ -119,9 +119,37 @@ def is_absolute(target):
                 or FILE_URI.match(target) or target.startswith("/"))
 
 
-def classify(link, allow_launch=False):
-    """-> (verdict, reason).  verdict is ok / warn / fail."""
+OPEN_IN = ("viewer", "browser", "any")
+
+POLICY = {
+    "viewer": {
+        "want": "/GoToR",
+        "ok": ("/GoToR",),
+        "why": "opens in the PDF viewer",
+    },
+    "browser": {
+        "want": "/URI",
+        "ok": ("/URI",),
+        "why": "opens in the default browser",
+    },
+    "any": {
+        "want": None,
+        "ok": ("/GoToR", "/URI", "/Launch"),
+        "why": "action type not checked",
+    },
+}
+
+
+def classify(link, allow_launch=False, open_in="viewer"):
+    """-> (verdict, reason).  verdict is ok / warn / fail.
+
+    `open_in` is the policy the bundle is meant to follow:
+      viewer   every local link must be /GoToR
+      browser  every local link must be /URI
+      any      leave the action type alone; only the paths are checked
+    """
     action, target = link["action"], link["target"]
+    rule = POLICY[open_in]
 
     if action in ("/GoTo", "(none)"):
         return "ok", "internal jump - stays in this document"
@@ -141,20 +169,22 @@ def classify(link, allow_launch=False):
         problems.append("leading ./ - not part of the PDF file-specification "
                         "grammar, and some macOS viewers reject it")
 
-    if action == "/GoToR":
-        pass                                            # the one we want
-    elif action == "/Launch":
-        if not allow_launch:
-            problems.append("/Launch - opens via the OS file association, so "
-                            "a browser if Edge or Chrome owns .pdf")
-    elif action == "/URI":
-        problems.append("/URI on a local file - opens in a browser")
-    else:
+    if action not in ("/GoToR", "/Launch", "/URI"):
         problems.append("%s is not a file link action" % action)
+    elif action == "/Launch" and open_in != "any" and not allow_launch:
+        problems.append("/Launch - opens via the OS file association, so a "
+                        "browser if Edge or Chrome owns .pdf")
+    elif action not in rule["ok"]:
+        if open_in == "viewer":
+            problems.append("/URI on a local file - opens in a browser, not "
+                            "the PDF viewer")
+        else:
+            problems.append("/GoToR opens in the PDF viewer - this bundle is "
+                            "meant to open links in a browser")
 
     if problems:
         return "fail", "; ".join(problems)
-    return "ok", "relative /GoToR - opens in the PDF viewer"
+    return "ok", "relative %s - %s" % (action, rule["why"])
 
 
 def resolve_target(target, base_dir):
@@ -268,7 +298,8 @@ def check(path, args):
     for page in doc:
         for link in read_links(doc, page):
             total += 1
-            verdict, reason = classify(link, args.allow_launch)
+            verdict, reason = classify(link, args.allow_launch,
+                                       args.open_in)
 
             # A link can be perfectly formed and still not open, because
             # nothing of that name is sitting where it points.
@@ -293,10 +324,10 @@ def check(path, args):
     fails = sum(len(v) for k, v in groups.items() if k[0] == "fail")
     warns = sum(len(v) for k, v in groups.items() if k[0] == "warn")
 
-    print("%s   %d page%s, %d link%s"
+    print("%s   %d page%s, %d link%s   [links should open in: %s]"
           % (os.path.basename(path), doc.page_count,
              "" if doc.page_count == 1 else "s",
-             total, "" if total == 1 else "s"))
+             total, "" if total == 1 else "s", args.open_in))
     if not total:
         print("  NO LINK ANNOTATIONS AT ALL - if you expected some, the export "
               "dropped them (use Save As PDF, not Print to PDF)")
@@ -335,7 +366,7 @@ def fix(path, args):
             info = raw.get(link.get("xref"))
             if not info:
                 continue
-            if classify(info, args.allow_launch)[0] != "fail":
+            if classify(info, args.allow_launch, args.open_in)[0] != "fail":
                 continue
             target = info["target"]
             if not target or WEB.match(target):
@@ -343,11 +374,28 @@ def fix(path, args):
             rel = relative_to(target, base_dir)
             while rel.startswith("./"):
                 rel = rel[2:]
+
+            if args.open_in == "browser":
+                new = {"kind": fitz.LINK_URI, "from": link["from"], "uri": rel}
+            elif args.open_in == "any":
+                # Keep whatever action the link already had; only the path is
+                # repaired. A /URI carries its target in "uri", not "file".
+                if info["action"] == "/URI":
+                    new = {"kind": fitz.LINK_URI, "from": link["from"],
+                           "uri": rel}
+                else:
+                    kind = (fitz.LINK_GOTOR if info["action"] == "/GoToR"
+                            else fitz.LINK_LAUNCH)
+                    new = {"kind": kind, "from": link["from"], "file": rel}
+                    if kind == fitz.LINK_GOTOR:
+                        new["page"] = 0
+                        new["to"] = fitz.Point(0, 0)
+            else:
+                new = {"kind": fitz.LINK_GOTOR, "from": link["from"],
+                       "file": rel, "page": 0, "to": fitz.Point(0, 0)}
             try:
                 page.delete_link(link)
-                page.insert_link({"kind": fitz.LINK_GOTOR, "from": link["from"],
-                                  "file": rel, "page": 0,
-                                  "to": fitz.Point(0, 0)})
+                page.insert_link(new)
                 changed += 1
             except Exception as exc:
                 print("  p%d: could not rewrite %s (%s)"
@@ -374,8 +422,12 @@ def fix(path, args):
     out = os.path.splitext(path)[0] + "_fixed.pdf"
     doc.save(out, garbage=3, deflate=True)
     doc.close()
-    print("  rewrote %d link(s) as relative /GoToR  ->  %s"
-          % (changed, os.path.basename(out)))
+    print("  rewrote %d link(s) as %s  ->  %s"
+          % (changed,
+             {"viewer": "relative /GoToR (opens in the PDF viewer)",
+              "browser": "relative /URI (opens in a browser)",
+              "any": "relative paths, action types unchanged"}[args.open_in],
+             os.path.basename(out)))
     print("  now re-check it:  %s \"%s\""
           % (prog_name(), os.path.basename(out)))
     return changed
@@ -413,6 +465,14 @@ def main(argv=None):
     ap.add_argument("--fix", action="store_true",
                     help="rewrite failing links as relative /GoToR, into "
                          "<name>_fixed.pdf")
+    ap.add_argument("--open-in", choices=OPEN_IN, default="viewer",
+                    metavar="{viewer,browser,any}",
+                    help="how local links should open. viewer (default): "
+                         "every one must be /GoToR, which opens the exhibit "
+                         "in the PDF viewer. browser: every one must be /URI, "
+                         "which hands it to the default browser. any: leave "
+                         "the action types as they are and only check the "
+                         "paths. --fix converts to whichever you choose.")
     ap.add_argument("--no-resolve", action="store_true",
                     help="do not check that each target actually exists next "
                          "to the PDF (use when the exhibits are not to hand)")
