@@ -68,6 +68,7 @@ will fail this check until the two are reconciled.
 | | |
 |---|---|
 | `affstamp.py` | Engine, command line, and text menu. All the logic lives here. |
+| `pdflinkcheck.py` | Link analysis, shared with AffStamp and shipped separately as its own tool. |
 | `affstamp_gui.py` | Tkinter window. A thin shell over `affstamp.py`. |
 | `AffStamp.spec` | PyInstaller: both executables from one shared runtime folder. |
 | `build_exe.bat` | Rebuilds `dist\AffStamp\` on Windows. |
@@ -136,8 +137,27 @@ Notes for locked-down machines:
 
 ## Provenance
 
-Reconstructed from the design conversation in
-`Overlaying_Scanned Signatures on Hyperlinked PDF.md` plus the recovered
-transcript of the build session. Behaviour, option names, output filenames and
-the window layout match the 1.2.0 build; the Python source is a rewrite, not
-the original bytes.
+`affstamp.py` and `affstamp_gui.py` are the original 1.2.0 source, recovered
+from the machine they were written on. Version 1.3.0 merges in the link
+analysis developed alongside `pdflinkcheck.py`:
+
+- **the action type is read from the raw annotation object.** PyMuPDF's
+  `page.get_links()` reports a `/Launch` action as kind 5 — the same value it
+  reports for a real `/GoToR` — so `links --dump` used to mislabel every
+  `/Launch` link, and `--check` inherited the blind spot. That distinction is
+  the difference between an exhibit opening in the PDF viewer and being handed
+  to whatever owns `.pdf` on the reader's machine.
+- **`--open-in {viewer,browser,any}`** on `links --fix-relative`, so a bundle
+  can be built for the PDF viewer, for the browser, or repaired without
+  changing how it behaves.
+- **`--check` resolves targets case-sensitively**, by listing the directory
+  rather than trusting `os.path.exists`, which returns `True` for the wrong
+  spelling on a case-insensitive filesystem — exactly how a bundle passes on
+  the machine that built it and fails on a network share.
+- **a leading `./` is no longer written** (not part of the PDF
+  file-specification grammar), and `/GoToR` destinations are `[0/Fit]` rather
+  than `[0/XYZ 0 0 0]`, where a top coordinate of 0 is the *bottom* of the
+  page — exhibits used to open scrolled to the foot of their first page.
+
+The design conversation that started it is in
+`Overlaying_Scanned Signatures on Hyperlinked PDF.md`.

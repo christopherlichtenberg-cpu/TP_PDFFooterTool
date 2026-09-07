@@ -1,6 +1,3 @@
-# Runtime dependencies. Only two, deliberately - no numpy, which would add
-# about 45 MB to the frozen build for work Pillow already does.
-#
-# Last built and tested against pymupdf 1.28.2 and pillow 12.3.0.
-pymupdf>=1.23.8
-pillow>=10.0.1
+# Pinned to what this was built and tested against (Python 3.14, Windows).
+pymupdf==1.27.2.2
+pillow==12.2.0

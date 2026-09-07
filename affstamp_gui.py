@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-AffStamp - the window.
+AffStamp - windowed front end.
 
-A thin Tk shell over affstamp.py.  Every step is the same code the command
-line runs; this only collects the settings, runs the step on a worker thread
-so the window stays responsive, and colours what it prints.
+Every button runs exactly the same code as the command line; the console
+output each step produces is streamed into the log pane rather than thrown
+away, because the warnings it prints are the point of the tool.
+
+Long steps run on a worker thread so the window never freezes. Only the
+main thread touches widgets - the worker posts text through a queue.
 """
-
 from __future__ import annotations
 
+import contextlib
 import os
 import queue
 import subprocess
@@ -19,594 +22,591 @@ import traceback
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-import affstamp
-from affstamp import APP, VERSION
+# In a windowed (--noconsole) build there is no real stdout. Give the
+# interpreter something harmless to write to before anything prints.
+if sys.stdout is None or not hasattr(sys.stdout, "write"):
+    sys.stdout = open(os.devnull, "w")
+if sys.stderr is None or not hasattr(sys.stderr, "write"):
+    sys.stderr = open(os.devnull, "w")
+
+import affstamp as A
 
 PAD = 8
-MONO = ("Consolas", 9) if os.name == "nt" else ("DejaVu Sans Mono", 9)
-
-COLOURS = {
-    "info":  "#111111",
-    "head":  "#0b3d6b",
-    "warn":  "#8a5300",
-    "error": "#a11212",
-    "ok":    "#12662b",
-}
 
 
-def open_in_explorer(path: str) -> None:
-    """Show a file or folder in whatever the platform uses for that."""
-    if not path or not os.path.exists(path):
-        return
-    try:
-        if os.name == "nt":
-            if os.path.isdir(path):
-                os.startfile(path)                      # noqa: S606
-            else:
-                subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
-        elif sys.platform == "darwin":
-            if os.path.isdir(path):
-                subprocess.Popen(["open", path])
-            else:
-                subprocess.Popen(["open", "-R", path])
-        else:
-            subprocess.Popen(["xdg-open",
-                              path if os.path.isdir(path)
-                              else os.path.dirname(path)])
-    except Exception:
+class _QueueWriter:
+    """File-like object that funnels a worker's output to the UI thread."""
+
+    def __init__(self, q):
+        self.q = q
+
+    def write(self, s):
+        if s:
+            self.q.put(s)
+        return len(s)
+
+    def flush(self):
         pass
 
-
-def open_file(path: str) -> None:
-    if not path or not os.path.isfile(path):
-        return
-    try:
-        if os.name == "nt":
-            os.startfile(path)                          # noqa: S606
-        elif sys.platform == "darwin":
-            subprocess.Popen(["open", path])
-        else:
-            subprocess.Popen(["xdg-open", path])
-    except Exception:
-        pass
+    def isatty(self):
+        return False
 
 
-class AffStampWindow(object):
-
-    def __init__(self, root: tk.Tk):
-        self.root = root
-        self.session = affstamp.Session()
-        self.queue = queue.Queue()
-        self.busy = False
-
-        root.title("%s %s" % (APP, VERSION))
-        root.minsize(940, 680)
-        try:
-            root.tk.call("tk", "scaling", 1.25)
-        except Exception:
-            pass
-
+class AffStampGUI(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("AffStamp %s" % A.VERSION)
+        self.minsize(940, 700)
         style = ttk.Style()
-        for theme in ("vista", "winnative", "clam"):
-            if theme in style.theme_names():
-                try:
-                    style.theme_use(theme)
-                    break
-                except Exception:
-                    continue
-        style.configure("Run.TButton", font=("Segoe UI", 9, "bold"))
-
-        self.v_base = tk.StringVar(value=self.session.base)
-        self.v_scan = tk.StringVar(value=self.session.scan)
-        self.v_out = tk.StringVar(value=self.session.out_dir)
-        self.v_height = tk.StringVar(value=self._fmt(self.session.height))
-        self.v_edge = tk.StringVar(value=self._fmt(self.session.edge))
-        self.v_dx = tk.StringVar(value=self._fmt(self.session.dx))
-        self.v_dy = tk.StringVar(value=self._fmt(self.session.dy))
-        self.v_trial = tk.StringVar(value=self.session.trial_pages)
-        self.v_replace = tk.BooleanVar(value=self.session.replace_last)
-        self.v_status = tk.StringVar(value="Ready.")
-
-        self._build_files(root)
-        self._build_settings(root)
-        self._build_steps(root)
-        self._build_output(root)
-        self._build_footer(root)
-
-        affstamp.set_writer(self._writer)
-        affstamp.set_asker(self._asker)
-
-        root.protocol("WM_DELETE_WINDOW", self.on_close)
-        self.root.after(80, self._drain)
-
-        self.log("%s %s" % (APP, VERSION), "head")
-        self.log("Choose the two PDFs, then work left to right through the "
-                 "numbered buttons.")
-        self.log("First time on this machine, click Self-test.")
-        if self.session.base or self.session.scan:
-            self.log("Restored the files and settings from last time.", "ok")
-
-    # -- fields ------------------------------------------------------------
-
-    @staticmethod
-    def _fmt(value) -> str:
         try:
-            f = float(value or 0)
-        except (TypeError, ValueError):
-            return "0"
-        return ("%g" % f) if f else "0"
+            style.theme_use("vista")
+        except tk.TclError:
+            pass
+        style.configure("Accent.TButton", font=("Segoe UI", 9, "bold"))
 
-    def _build_files(self, root):
-        box = ttk.LabelFrame(root, text="Files", padding=PAD)
-        box.pack(fill="x", padx=PAD, pady=(PAD, 4))
-        box.columnconfigure(1, weight=1)
+        self.q = queue.Queue()
+        self.busy = False
+        self.buttons = []
+        self.last_output = None
 
-        rows = (("Hyperlinked PDF", self.v_base, self.pick_base, "Browse..."),
-                ("Scan PDF", self.v_scan, self.pick_scan, "Browse..."),
-                ("Output folder", self.v_out, self.pick_out, "Change..."))
-        self.entries = []
-        for r, (label, var, cmd, button) in enumerate(rows):
-            ttk.Label(box, text=label).grid(row=r, column=0, sticky="w",
-                                            padx=(0, PAD), pady=2)
-            entry = ttk.Entry(box, textvariable=var)
-            entry.grid(row=r, column=1, sticky="ew", pady=2)
-            ttk.Button(box, text=button, command=cmd, width=11).grid(
-                row=r, column=2, padx=(PAD, 0), pady=2)
-            self.entries.append(entry)
+        st = A.load_state()
+        self.base = tk.StringVar(value=st.get("base", ""))
+        self.scan = tk.StringVar(value=st.get("scan", ""))
+        self.out_dir = tk.StringVar(value=st.get("out_dir", ""))
+        self.height = tk.StringVar(value=str(st.get("height", "")))
+        self.edge = tk.StringVar(value=str(st.get("edge", "")))
+        self.dx = tk.StringVar(value=str(st.get("dx", "0")))
+        self.dy = tk.StringVar(value=str(st.get("dy", "0")))
+        self.trial_pages = tk.StringVar(value="1-3")
+        self.replace_last = tk.BooleanVar(value=True)
+        self.status = tk.StringVar(value="Ready.")
+
+        self._build()
         self._show_tails()
+        self._poll()
+        self.protocol("WM_DELETE_WINDOW", self._close)
+
+    # -- layout ----------------------------------------------------------
+    def _build(self):
+        root = ttk.Frame(self, padding=PAD)
+        root.pack(fill="both", expand=True)
+
+        # ---- files
+        f = ttk.LabelFrame(root, text="Files", padding=PAD)
+        f.pack(fill="x")
+        f.columnconfigure(1, weight=1)
+
+        ttk.Label(f, text="Hyperlinked PDF").grid(row=0, column=0, sticky="w")
+        self.e_base = ttk.Entry(f, textvariable=self.base)
+        self.e_base.grid(row=0, column=1, sticky="ew", padx=6)
+        ttk.Button(f, text="Browse...", width=11,
+                   command=self._pick_base).grid(row=0, column=2)
+
+        ttk.Label(f, text="Scan PDF").grid(row=1, column=0, sticky="w",
+                                           pady=(6, 0))
+        self.e_scan = ttk.Entry(f, textvariable=self.scan)
+        self.e_scan.grid(row=1, column=1, sticky="ew", padx=6, pady=(6, 0))
+        ttk.Button(f, text="Browse...", width=11,
+                   command=self._pick_scan).grid(row=1, column=2, pady=(6, 0))
+
+        ttk.Label(f, text="Output folder").grid(row=2, column=0, sticky="w",
+                                                pady=(6, 0))
+        self.e_out = ttk.Entry(f, textvariable=self.out_dir)
+        self.e_out.grid(row=2, column=1, sticky="ew", padx=6, pady=(6, 0))
+        ttk.Button(f, text="Change...", width=11,
+                   command=self._pick_outdir).grid(row=2, column=2,
+                                                   pady=(6, 0))
+        ttk.Label(f, text="Everything the tool writes goes here. It defaults "
+                          "to the folder holding the hyperlinked PDF.",
+                  foreground="#555").grid(row=3, column=1, sticky="w",
+                                          padx=6, pady=(4, 0))
+
+        # ---- settings
+        s = ttk.LabelFrame(root, text="Settings", padding=PAD)
+        s.pack(fill="x", pady=(PAD, 0))
+        ttk.Label(s, text="Strip height").grid(row=0, column=0, sticky="w")
+        ttk.Entry(s, textvariable=self.height, width=7).grid(row=0, column=1)
+        ttk.Label(s, text="mm").grid(row=0, column=2, sticky="w", padx=(2, 16))
+
+        ttk.Label(s, text="Edge trim").grid(row=0, column=3, sticky="w")
+        ttk.Entry(s, textvariable=self.edge, width=7).grid(row=0, column=4)
+        ttk.Label(s, text="mm").grid(row=0, column=5, sticky="w", padx=(2, 16))
+
+        ttk.Label(s, text="Nudge  dx").grid(row=0, column=6, sticky="w")
+        ttk.Entry(s, textvariable=self.dx, width=7).grid(row=0, column=7)
+        ttk.Label(s, text="mm (+right)").grid(row=0, column=8, sticky="w",
+                                              padx=(2, 12))
+        ttk.Label(s, text="dy").grid(row=0, column=9, sticky="w")
+        ttk.Entry(s, textvariable=self.dy, width=7).grid(row=0, column=10)
+        ttk.Label(s, text="mm (+down)").grid(row=0, column=11, sticky="w",
+                                             padx=(2, 0))
+        ttk.Label(s, text="Run Measure to fill the height and edge trim in "
+                          "automatically.", foreground="#555"
+                  ).grid(row=1, column=0, columnspan=12, sticky="w",
+                         pady=(6, 0))
+
+        # ---- steps
+        g = ttk.LabelFrame(root, text="Steps", padding=PAD)
+        g.pack(fill="x", pady=(PAD, 0))
+        for c in range(4):
+            g.columnconfigure(c, weight=1)
+
+        self._step(g, 0, 0, "1.  Check / repair links", self.do_links)
+        self._step(g, 0, 1, "2.  Ghost overlay", self.do_compare)
+        self._step(g, 0, 2, "3.  Measure", self.do_measure)
+        self._step(g, 0, 3, "Ruler PDF", self.do_ruler)
+
+        row = ttk.Frame(g)
+        row.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(10, 4))
+        ttk.Label(row, text="Trial pages").pack(side="left")
+        ttk.Entry(row, textvariable=self.trial_pages,
+                  width=12).pack(side="left", padx=(6, 16))
+        ttk.Checkbutton(row, variable=self.replace_last,
+                        text="Replace the final page with the scan's "
+                             "(full run only)").pack(side="left")
+
+        self._step(g, 2, 0, "4.  Trial stamp", self.do_trial)
+        b = self._step(g, 2, 1, "5.  FULL STAMP", self.do_full)
+        b.configure(style="Accent.TButton")
+        self._step(g, 2, 2, "Audit  (optional)", self.do_audit)
+        self._step(g, 2, 3, "Self-test", self.do_selftest)
+
+        # ---- log
+        lf = ttk.LabelFrame(root, text="Output", padding=(PAD, PAD, PAD, 4))
+        lf.pack(fill="both", expand=True, pady=(PAD, 0))
+        self.log = tk.Text(lf, wrap="none", height=18, font=("Consolas", 9),
+                           background="#1b1b1b", foreground="#dcdcdc",
+                           insertbackground="#dcdcdc", borderwidth=0)
+        ys = ttk.Scrollbar(lf, orient="vertical", command=self.log.yview)
+        xs = ttk.Scrollbar(lf, orient="horizontal", command=self.log.xview)
+        self.log.configure(yscrollcommand=ys.set, xscrollcommand=xs.set)
+        self.log.grid(row=0, column=0, sticky="nsew")
+        ys.grid(row=0, column=1, sticky="ns")
+        xs.grid(row=1, column=0, sticky="ew")
+        lf.rowconfigure(0, weight=1)
+        lf.columnconfigure(0, weight=1)
+
+        self.log.tag_configure("warn", foreground="#ffc663")
+        self.log.tag_configure("bad", foreground="#ff7b72")
+        self.log.tag_configure("good", foreground="#7ee787")
+        self.log.tag_configure("head", foreground="#79c0ff")
+        self.log.configure(state="disabled")
+
+        # ---- footer
+        ft = ttk.Frame(root)
+        ft.pack(fill="x", pady=(PAD, 0))
+        ttk.Button(ft, text="Open output folder",
+                   command=self.open_folder).pack(side="left")
+        self.open_btn = ttk.Button(ft, text="Open last file",
+                                   command=self.open_last, state="disabled")
+        self.open_btn.pack(side="left", padx=6)
+        ttk.Button(ft, text="Save log...",
+                   command=self.save_log).pack(side="left")
+        ttk.Button(ft, text="Clear", command=self.clear_log).pack(side="left",
+                                                                  padx=6)
+        self.bar = ttk.Progressbar(ft, mode="indeterminate", length=150)
+        self.bar.pack(side="right")
+        ttk.Label(ft, textvariable=self.status).pack(side="right", padx=10)
+
+    def _step(self, parent, r, c, text, cmd):
+        b = ttk.Button(parent, text=text, command=cmd)
+        b.grid(row=r, column=c, sticky="ew", padx=3, pady=3, ipady=4)
+        self.buttons.append(b)
+        return b
+
+    # -- file pickers ----------------------------------------------------
+    def _pick_base(self):
+        p = filedialog.askopenfilename(
+            title="Select the hyperlinked PDF (the Word export)",
+            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")])
+        if p:
+            self.base.set(p)
+            self._show_tails()
+            if not self.out_dir.get() or not os.path.isdir(self.out_dir.get()):
+                self.out_dir.set(os.path.dirname(os.path.abspath(p)))
+            else:
+                self.out_dir.set(os.path.dirname(os.path.abspath(p)))
+            self._save()
+
+    def _pick_scan(self):
+        p = filedialog.askopenfilename(
+            title="Select the scanned signed PDF",
+            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")])
+        if p:
+            self.scan.set(p)
+            self._show_tails()
+            self._save()
+
+    def _pick_outdir(self):
+        d = filedialog.askdirectory(title="Where should output files go?",
+                                    initialdir=self.out_dir.get() or ".")
+        if d:
+            self.out_dir.set(d)
+            self._show_tails()
+            self._save()
 
     def _show_tails(self):
-        # A long path is far more useful read from the file name end.
-        for entry in getattr(self, "entries", []):
-            try:
-                entry.xview_moveto(1.0)
-            except Exception:
-                pass
+        """A long path is only useful if you can see the filename end."""
+        for e in (self.e_base, self.e_scan, self.e_out):
+            e.after_idle(lambda w=e: w.xview_moveto(1.0))
 
-    def _build_settings(self, root):
-        box = ttk.LabelFrame(root, text="Settings", padding=PAD)
-        box.pack(fill="x", padx=PAD, pady=4)
+    def _save(self):
+        st = {"base": self.base.get(), "scan": self.scan.get(),
+              "out_dir": self.out_dir.get()}
+        for k, v in (("height", self.height), ("edge", self.edge),
+                     ("dx", self.dx), ("dy", self.dy)):
+            if v.get().strip():
+                st[k] = v.get().strip()
+        A.save_state(st)
 
-        def field(parent, label, var, suffix, col):
-            ttk.Label(parent, text=label).grid(row=0, column=col, sticky="e",
-                                               padx=(0 if col == 0 else PAD*2, 4))
-            ttk.Entry(parent, textvariable=var, width=7).grid(
-                row=0, column=col + 1, sticky="w")
-            ttk.Label(parent, text=suffix).grid(row=0, column=col + 2,
-                                                sticky="w", padx=(4, 0))
+    def _close(self):
+        self._save()
+        self.destroy()
 
-        field(box, "Strip height", self.v_height, "mm above the page edge", 0)
-        field(box, "Edge trim", self.v_edge, "mm", 3)
-        field(box, "Nudge dx", self.v_dx, "mm (+ right)", 6)
-        field(box, "dy", self.v_dy, "mm (+ down)", 9)
+    # -- logging ---------------------------------------------------------
+    def _append(self, text, tag=None):
+        self.log.configure(state="normal")
+        for line in text.splitlines(keepends=True):
+            t = tag
+            if t is None:
+                bare = line.strip()
+                if bare.startswith("!!"):
+                    t = "warn"
+                elif ("ERROR" in bare or "FAILED" in bare
+                        or "MISMATCH" in bare or "DO NOT USE" in bare):
+                    t = "bad"
+                elif bare.startswith("OK") or "PASSED" in bare or "Good." in bare:
+                    t = "good"
+            self.log.insert("end", line, t or ())
+        self.log.see("end")
+        self.log.configure(state="disabled")
 
-    def _build_steps(self, root):
-        box = ttk.LabelFrame(root, text="Steps", padding=PAD)
-        box.pack(fill="x", padx=PAD, pady=4)
+    def clear_log(self):
+        self.log.configure(state="normal")
+        self.log.delete("1.0", "end")
+        self.log.configure(state="disabled")
 
-        top = ttk.Frame(box)
-        top.pack(fill="x")
-        self.buttons = []
+    def save_log(self):
+        p = filedialog.asksaveasfilename(
+            defaultextension=".txt", initialdir=self.out_dir.get() or ".",
+            initialfile="affstamp_log.txt",
+            filetypes=[("Text files", "*.txt")])
+        if p:
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(self.log.get("1.0", "end"))
+            self.status.set("Log saved.")
 
-        def button(parent, text, cmd, style=None, width=22):
-            b = ttk.Button(parent, text=text, command=cmd, width=width)
-            if style:
-                b.configure(style=style)
-            b.pack(side="left", padx=(0, PAD))
-            self.buttons.append(b)
-            return b
-
-        button(top, "1. Check / repair links", self.do_links)
-        button(top, "2. Ghost overlay", self.do_ghost, width=18)
-        button(top, "3. Measure", self.do_measure, width=14)
-        button(top, "Ruler PDF", self.do_ruler, width=13)
-
-        mid = ttk.Frame(box)
-        mid.pack(fill="x", pady=(PAD, 0))
-        ttk.Label(mid, text="Trial pages").pack(side="left")
-        ttk.Entry(mid, textvariable=self.v_trial, width=10).pack(
-            side="left", padx=(4, PAD * 2))
-        ttk.Checkbutton(mid, text="Replace the final page with the scan's",
-                        variable=self.v_replace).pack(side="left")
-
-        low = ttk.Frame(box)
-        low.pack(fill="x", pady=(PAD, 0))
-        button(low, "4. Trial stamp", self.do_trial, width=18)
-        button(low, "5. FULL STAMP", self.do_full, style="Run.TButton",
-               width=18)
-        button(low, "Audit", self.do_audit, width=13)
-        button(low, "Self-test", self.do_selftest, width=13)
-
-    def _build_output(self, root):
-        box = ttk.LabelFrame(root, text="Output", padding=4)
-        box.pack(fill="both", expand=True, padx=PAD, pady=4)
-        self.text = tk.Text(box, wrap="word", font=MONO, height=18,
-                            background="#fbfbfb", relief="flat",
-                            borderwidth=0, state="disabled")
-        bar = ttk.Scrollbar(box, orient="vertical", command=self.text.yview)
-        self.text.configure(yscrollcommand=bar.set)
-        self.text.pack(side="left", fill="both", expand=True)
-        bar.pack(side="right", fill="y")
-        for level, colour in COLOURS.items():
-            self.text.tag_configure(level, foreground=colour)
-        self.text.tag_configure("head", foreground=COLOURS["head"],
-                                font=(MONO[0], MONO[1], "bold"))
-        self.text.tag_configure("error", foreground=COLOURS["error"],
-                                font=(MONO[0], MONO[1], "bold"))
-
-    def _build_footer(self, root):
-        box = ttk.Frame(root, padding=(PAD, 0, PAD, PAD))
-        box.pack(fill="x")
-        ttk.Button(box, text="Open output folder", width=18,
-                   command=self.open_folder).pack(side="left")
-        ttk.Button(box, text="Open last file", width=15,
-                   command=self.open_last).pack(side="left", padx=PAD)
-        ttk.Button(box, text="Save log...", width=12,
-                   command=self.save_log).pack(side="left")
-        ttk.Button(box, text="Clear", width=8,
-                   command=self.clear_log).pack(side="left", padx=PAD)
-        self.progress = ttk.Progressbar(box, mode="indeterminate", length=150)
-        self.progress.pack(side="right")
-        ttk.Label(box, textvariable=self.v_status).pack(side="right",
-                                                        padx=PAD)
-
-    # -- log ---------------------------------------------------------------
-
-    def _writer(self, msg: str, level: str = "info") -> None:
-        """Called from the worker thread - Tk is only touched in _drain."""
-        self.queue.put((msg, level))
-
-    def log(self, msg: str, level: str = "info") -> None:
-        self.queue.put((msg, level))
-
-    def _drain(self) -> None:
+    # -- running ---------------------------------------------------------
+    def _poll(self):
         try:
             while True:
-                msg, level = self.queue.get_nowait()
-                if msg == "__done__":
-                    self._finish(*level)
-                    continue
-                self.text.configure(state="normal")
-                self.text.insert("end", msg + "\n", level)
-                self.text.see("end")
-                self.text.configure(state="disabled")
+                item = self.q.get_nowait()
+                if isinstance(item, tuple):
+                    self._finish(*item)
+                else:
+                    self._append(item)
         except queue.Empty:
             pass
-        self.root.after(80, self._drain)
+        self.after(60, self._poll)
 
-    def _asker(self, question: str, default: bool) -> bool:
-        """affstamp asks a yes/no question; show it as a dialog.
-
-        Called from the worker thread, so the dialog is scheduled onto the
-        main thread and the worker waits for the answer.
-        """
-        if threading.current_thread() is threading.main_thread():
-            return bool(messagebox.askyesno(APP, question, parent=self.root))
-        box, done = {}, threading.Event()
-
-        def show():
-            try:
-                box["answer"] = bool(messagebox.askyesno(APP, question,
-                                                         parent=self.root))
-            except Exception:
-                box["answer"] = default
-            finally:
-                done.set()
-
-        self.root.after(0, show)
-        done.wait()
-        return box.get("answer", default)
-
-    # -- running -----------------------------------------------------------
-
-    def _set_busy(self, busy: bool, label: str = "") -> None:
-        self.busy = busy
-        for b in self.buttons:
-            b.state(["disabled"] if busy else ["!disabled"])
-        if busy:
-            self.v_status.set("%s..." % label)
-            self.progress.start(12)
-        else:
-            self.progress.stop()
-            self.progress.configure(value=0)   # or it leaves a block behind
-
-    def _run(self, cmd: str, opts: dict, label: str, after=None) -> None:
+    def run(self, args, label, done=None, output=None):
         if self.busy:
             return
-        self.log("")
-        self._set_busy(True, label)
+        self.busy = True
+        for b in self.buttons:
+            b.configure(state="disabled")
+        self.bar.start(12)
+        self.status.set(label + "...")
+        self._append("\n" + "=" * 72 + "\n%s\n" % label + "=" * 72 + "\n",
+                     "head")
+        self.pending_output = output
 
         def work():
-            rc = 2
+            rc, buf = 1, _QueueWriter(self.q)
             try:
-                rc = self.session.run(cmd, opts)
+                with contextlib.redirect_stdout(buf), \
+                        contextlib.redirect_stderr(buf):
+                    ns = A.build_parser().parse_args(args)
+                    rc = ns.func(ns)
+            except SystemExit as e:
+                rc = e.code if isinstance(e.code, int) else 1
+                buf.write("\n%s\n" % e)
             except Exception:
-                for line in traceback.format_exc().splitlines():
-                    self._writer("   " + line, "error")
-            finally:
-                self.queue.put(("__done__", (rc, label, after)))
+                rc = 1
+                buf.write("\n" + traceback.format_exc())
+            self.q.put((rc, label, done))
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _finish(self, rc: int, label: str, after) -> None:
-        self._set_busy(False)
-        self.v_status.set("%s: %s" % (label, "done" if rc == 0 else
-                                      "finished with problems"))
-        self._refresh_fields()
-        if callable(after):
+    def _finish(self, rc, label, done):
+        self.busy = False
+        self.bar.stop()
+        self.bar.configure(value=0)
+        for b in self.buttons:
+            b.configure(state="normal")
+        self.status.set("%s: %s" % (label,
+                                    "done" if rc == 0 else "finished (%s)" % rc))
+        out = getattr(self, "pending_output", None)
+        if out and os.path.isfile(out):
+            self.last_output = out
+            self.open_btn.configure(state="normal")
+        if done:
             try:
-                after(rc)
+                done(rc)
             except Exception:
-                pass
+                self._append(traceback.format_exc(), "bad")
 
-    def _refresh_fields(self) -> None:
-        s = self.session
-        self.v_base.set(s.base)
-        self.v_scan.set(s.scan)
-        self.v_out.set(s.out_dir)
-        self.v_height.set(self._fmt(s.height))
-        self.v_edge.set(self._fmt(s.edge))
-        self.v_dx.set(self._fmt(s.dx))
-        self.v_dy.set(self._fmt(s.dy))
-        self._show_tails()
+    # -- validation ------------------------------------------------------
+    def _files(self, need_scan=True):
+        b, s = self.base.get().strip(), self.scan.get().strip()
+        if not b or not os.path.isfile(b):
+            messagebox.showerror("AffStamp",
+                                 "Choose the hyperlinked PDF first.")
+            return None
+        if need_scan and (not s or not os.path.isfile(s)):
+            messagebox.showerror("AffStamp", "Choose the scan PDF first.")
+            return None
+        if not self.out_dir.get().strip():
+            self.out_dir.set(os.path.dirname(os.path.abspath(b)))
+        self._save()
+        return b, s
 
-    # -- validation --------------------------------------------------------
-
-    def _number(self, var, label: str, default=0.0):
-        raw = (var.get() or "").strip()
-        if not raw:
-            return default
+    def _number(self, var, name, required=True):
+        v = var.get().strip()
+        if not v:
+            if required:
+                messagebox.showerror("AffStamp", "Set the %s first." % name)
+                return None
+            return None
         try:
-            return float(raw)
+            return float(v)
         except ValueError:
-            messagebox.showerror(APP, "%s must be a number, not %r."
-                                 % (label, raw), parent=self.root)
+            messagebox.showerror("AffStamp",
+                                 "%s must be a number, not %r." % (name, v))
             return None
 
-    def _collect(self, need_height: bool = False) -> bool:
-        """Pull the fields into the session, complaining about anything odd."""
-        base, scan = self.v_base.get().strip(), self.v_scan.get().strip()
-        if not base or not os.path.isfile(base):
-            messagebox.showerror(APP, "Choose the hyperlinked PDF first.",
-                                 parent=self.root)
-            return False
-        if not scan or not os.path.isfile(scan):
-            messagebox.showerror(APP, "Choose the scan PDF first.",
-                                 parent=self.root)
-            return False
+    def _out(self, filename):
+        return os.path.join(self.out_dir.get() or ".", filename)
 
-        values = {}
-        for key, var, label in (("height", self.v_height, "Strip height"),
-                                ("edge", self.v_edge, "Edge trim"),
-                                ("dx", self.v_dx, "Nudge dx"),
-                                ("dy", self.v_dy, "Nudge dy")):
-            value = self._number(var, label)
-            if value is None:
-                return False
-            values[key] = value
-
-        if need_height and values["height"] <= 0:
-            messagebox.showerror(
-                APP, "No strip height yet.\n\nRun Measure first, or type the "
-                     "height in millimetres.", parent=self.root)
-            return False
-        if values["height"] and values["edge"] >= values["height"]:
-            messagebox.showerror(
-                APP, "Edge trim (%g mm) must be less than the strip height "
-                     "(%g mm) or nothing is left to lift."
-                     % (values["edge"], values["height"]), parent=self.root)
-            return False
-
-        s = self.session
-        s.set_base(base)
-        s.scan = scan
-        out = self.v_out.get().strip()
-        s.out_dir = out if out and os.path.isdir(out) else s.out_dir
-        s.height, s.edge = values["height"], values["edge"]
-        s.dx, s.dy = values["dx"], values["dy"]
-        s.trial_pages = (self.v_trial.get() or "1-3").strip()
-        s.replace_last = bool(self.v_replace.get())
-        s.save()
-        return True
-
-    # -- the steps ---------------------------------------------------------
-
+    # -- steps -----------------------------------------------------------
     def do_links(self):
-        if not self._collect():
+        f = self._files(need_scan=False)
+        if not f:
             return
-        self._run("links", {"base": self.session.base,
-                            "out_dir": self.session.out_dir or None},
-                  "Checking links")
+        base, _ = f
 
-    def do_ghost(self):
-        if not self._collect():
+        def after(rc):
+            self._append("\n")
+            if messagebox.askyesno(
+                    "Repair links",
+                    "Rewrite any absolute paths as relative ones?\n\n"
+                    "Only needed if the output above flagged links as ABS.\n"
+                    "A repaired copy is written and AffStamp switches to it."):
+                out = self._out(os.path.splitext(os.path.basename(base))[0]
+                                + "_fixed.pdf")
+
+                def switch(rc2):
+                    if rc2 == 0 and os.path.isfile(out):
+                        self.base.set(out)
+                        self._save()
+                        self._append("\nNow using %s as the hyperlinked PDF.\n"
+                                     % os.path.basename(out), "good")
+                self.run(["links", "--base", base, "--fix-relative",
+                          "--out", out, "--check"],
+                         "Repair links", done=switch, output=out)
+
+        self.run(["links", "--base", base, "--dump", "--check"],
+                 "Check links", done=after)
+
+    def do_compare(self):
+        f = self._files()
+        if not f:
             return
-        self._run("ghost", dict(self.session.files(),
-                                pages=self.session.trial_pages),
-                  "Building the ghost overlay")
+        out = self._out("GHOST.pdf")
+
+        def after(rc):
+            if rc == 0:
+                messagebox.showinfo(
+                    "Ghost overlay",
+                    "Wrote GHOST.pdf.\n\nOpen it and flip through every "
+                    "page.\n\nBlack = hyperlinked PDF, red = scan.\n\n"
+                    "Red sitting on black means the pagination matches. Two "
+                    "different pages superimposed means a page break has "
+                    "moved - stop and fix the Word document.")
+        self.run(["compare", "--base", f[0], "--scan", f[1], "--out", out],
+                 "Ghost overlay", done=after, output=out)
 
     def do_measure(self):
-        if not self._collect():
+        f = self._files()
+        if not f:
             return
-        self._run("measure", self.session.files(), "Measuring")
+        A.LAST_SUGGESTED.clear()
+
+        def after(rc):
+            h = A.LAST_SUGGESTED.get("height")
+            if h:
+                self.height.set(str(h))
+                if A.LAST_SUGGESTED.get("edge"):
+                    self.edge.set(str(A.LAST_SUGGESTED["edge"]))
+                self._save()
+                self._append("\nFilled in: strip height %s mm%s\n"
+                             % (h, ", edge trim %s mm" % self.edge.get()
+                                if A.LAST_SUGGESTED.get("edge") else ""),
+                             "good")
+        self.run(["measure", "--base", f[0], "--scan", f[1]],
+                 "Measure", done=after)
 
     def do_ruler(self):
-        if not self._collect():
+        f = self._files()
+        if not f:
             return
-        if not self.session.height:
-            self.log("No strip height yet, so the ruler will have no box on "
-                     "it. Run Measure first if you want one.", "warn")
-        self._run("ruler", dict(self.session.files(),
-                                height=self.session.height or None,
-                                edge=self.session.edge),
-                  "Drawing the ruler")
+        args = ["ruler", "--scan", f[1], "--out-dir", self.out_dir.get()]
+        h = self._number(self.height, "strip height", required=False)
+        if h:
+            args += ["--height", str(h)]
+        if self.trial_pages.get().strip():
+            args += ["--pages", self.trial_pages.get().strip()]
+        out = self._out(os.path.splitext(os.path.basename(f[1]))[0]
+                        + "_RULER.pdf")
+        self.run(args, "Ruler PDF", output=out)
+
+    def _stamp_args(self, base, scan):
+        h = self._number(self.height, "strip height")
+        if h is None:
+            return None
+        args = ["stamp", "--base", base, "--scan", scan, "--height", str(h)]
+        e = self._number(self.edge, "edge trim", required=False)
+        if e:
+            args += ["--edge", str(e)]
+        for var, flag in ((self.dx, "--dx"), (self.dy, "--dy")):
+            v = self._number(var, flag, required=False)
+            if v:
+                args += [flag, str(v)]
+        return args
 
     def do_trial(self):
-        if not self._collect(need_height=True):
+        f = self._files()
+        if not f:
             return
-        self._run("stamp", self.session.stamp_opts(trial=True), "Trial stamp")
+        args = self._stamp_args(*f)
+        if args is None:
+            return
+        out = self._out("TEST.pdf")
+        args += ["--out", out, "--skip-last"]
+        if self.trial_pages.get().strip():
+            args += ["--pages", self.trial_pages.get().strip()]
+
+        def after(rc):
+            if rc == 0:
+                messagebox.showinfo(
+                    "Trial run",
+                    "Wrote TEST.pdf.\n\nPrint a page and hold it against the "
+                    "original.\n\nIf the marks sit slightly off, set the "
+                    "nudge (dx positive = right, dy positive = down) and run "
+                    "the trial again.")
+        self.run(args, "Trial stamp", done=after, output=out)
+
+    def _last_page_links(self, base):
+        try:
+            d = A.pymupdf.open(base)
+            n = [A.link_target(l) for l in d[d.page_count - 1].get_links()]
+            d.close()
+            return n
+        except Exception:
+            return []
 
     def do_full(self):
-        if not self._collect(need_height=True):
+        f = self._files()
+        if not f:
             return
-        s = self.session
-        lines = [
-            "About to stamp every page except the last.",
-            "",
-            "  Hyperlinked  %s" % os.path.basename(s.base),
-            "  Scan         %s" % os.path.basename(s.scan),
-            "  Strip        %g mm tall, %g mm trimmed off the edges"
-            % (s.height, s.edge),
-        ]
-        if s.dx or s.dy:
-            lines.append("  Nudge        dx %+g mm, dy %+g mm" % (s.dx, s.dy))
-        lines.append("  Writes       %s_SIGNED.pdf"
-                     % os.path.splitext(os.path.basename(s.base))[0])
-        lines.append("")
+        base, scan = f
+        args = self._stamp_args(base, scan)
+        if args is None:
+            return
 
-        if s.replace_last:
-            lines.append("The final page will be REPLACED with the scan's.")
-            try:
-                links = affstamp.final_page_links(s.base)
-            except Exception:
-                links = []
-            if links:
-                lines.append("")
-                lines.append("WARNING: the final page carries %d hyperlink(s), "
-                             "which that replacement will destroy:" % len(links))
-                for target in links[:8]:
-                    lines.append("    %s" % target)
-                if len(links) > 8:
-                    lines.append("    ... and %d more" % (len(links) - 8))
+        repl = self.replace_last.get()
+        msg = ["Stamp every page of:\n  %s\n" % os.path.basename(base)]
+        if repl:
+            msg.append("The final page will be REPLACED wholesale with the "
+                       "scan's final page.")
+            lost = self._last_page_links(base)
+            if lost:
+                msg.append("\nWarning: the final page carries %d link(s), "
+                           "which will be destroyed with it:\n  %s\n\nYou "
+                           "would need to re-add them in Acrobat."
+                           % (len(lost), "\n  ".join(lost[:6])))
+            else:
+                msg.append("It carries no links, so nothing is lost.")
         else:
-            lines.append("The final page will be left untouched.")
-        lines.append("")
-        lines.append("Go ahead?")
-
-        if not messagebox.askyesno(APP, "\n".join(lines), parent=self.root):
-            self.log("Full run cancelled.", "warn")
+            msg.append("The final page will be left untouched for you to "
+                       "replace in Acrobat.")
+        msg.append("\nProceed?")
+        if not messagebox.askyesno("Full run", "\n".join(msg)):
             return
-        self._run("stamp", s.stamp_opts(trial=False), "Full stamp")
+
+        args += ["--replace-last"] if repl else ["--skip-last"]
+        out = self._out(os.path.splitext(os.path.basename(base))[0]
+                        + "_SIGNED.pdf")
+        args += ["--out", out]
+
+        def after(rc):
+            if rc == 0:
+                messagebox.showinfo(
+                    "Full run complete",
+                    "Wrote %s\n\nAll link annotations checked and preserved."
+                    "\n\nNext: check it in Acrobat, then certify.\n\nNever "
+                    "run Save As Other > Optimized PDF or Reduce File Size "
+                    "on it." % os.path.basename(out))
+            elif rc == 4:
+                messagebox.showwarning(
+                    "Pages with no signature ink",
+                    "The file was written, but some pages had no signature "
+                    "ink in the strip.\n\nSee the log. Check those pages in "
+                    "the scan before relying on the file.")
+            else:
+                messagebox.showerror(
+                    "Problem",
+                    "The run reported a problem (code %s). Read the log "
+                    "before using the output." % rc)
+        self.run(args, "FULL STAMP", done=after, output=out)
 
     def do_audit(self):
-        if not self._collect():
+        f = self._files()
+        if not f:
             return
-        self._run("audit", {"base": self.session.base,
-                            "scan": self.session.scan}, "Auditing")
+        band = self._number(self.height, "strip height", required=False) or 30
+        self.run(["audit", "--base", f[0], "--scan", f[1],
+                  "--band", str(band)], "Audit")
 
     def do_selftest(self):
-        self._run("selftest", {}, "Self-test")
+        self.run(["selftest"], "Self-test")
 
-    # -- pickers and footer ------------------------------------------------
-
-    def _start_dir(self) -> str:
-        for path in (self.v_base.get(), self.v_scan.get(), self.v_out.get()):
-            path = (path or "").strip()
-            if path:
-                folder = path if os.path.isdir(path) else os.path.dirname(path)
-                if os.path.isdir(folder):
-                    return folder
-        return os.path.expanduser("~")
-
-    def _pick_pdf(self, title: str):
-        return filedialog.askopenfilename(
-            parent=self.root, title=title, initialdir=self._start_dir(),
-            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")])
-
-    def pick_base(self):
-        path = self._pick_pdf("Choose the hyperlinked PDF (the Word export)")
-        if not path:
-            return
-        self.session.set_base(os.path.abspath(path))
-        self.v_base.set(self.session.base)
-        self.v_out.set(self.session.out_dir)
-        self._show_tails()
-        self.session.save()
-        self.log("Hyperlinked PDF: %s" % self.session.base)
-        self.log("Output folder:   %s" % self.session.out_dir)
-
-    def pick_scan(self):
-        path = self._pick_pdf("Choose the scan of the signed hardcopy")
-        if not path:
-            return
-        self.session.scan = os.path.abspath(path)
-        self.v_scan.set(self.session.scan)
-        self._show_tails()
-        self.session.save()
-        self.log("Scan PDF: %s" % self.session.scan)
-
-    def pick_out(self):
-        folder = filedialog.askdirectory(parent=self.root,
-                                         title="Choose the output folder",
-                                         initialdir=self._start_dir())
-        if not folder:
-            return
-        self.session.out_dir = os.path.abspath(folder)
-        self.v_out.set(self.session.out_dir)
-        self._show_tails()
-        self.session.save()
-        self.log("Output folder: %s" % self.session.out_dir)
-
+    # -- opening things --------------------------------------------------
     def open_folder(self):
-        folder = (self.v_out.get() or "").strip()
-        if not folder and self.v_base.get():
-            folder = os.path.dirname(os.path.abspath(self.v_base.get()))
-        if os.path.isdir(folder):
-            open_in_explorer(folder)
+        d = self.out_dir.get() or "."
+        if os.path.isdir(d):
+            os.startfile(d)
         else:
-            messagebox.showinfo(APP, "No output folder yet.", parent=self.root)
+            messagebox.showerror("AffStamp", "No output folder set yet.")
 
     def open_last(self):
-        last = self.session.last_output
-        if last and os.path.isfile(last):
-            open_file(last)
-        else:
-            messagebox.showinfo(APP, "Nothing written yet in this session.",
-                                parent=self.root)
-
-    def save_log(self):
-        path = filedialog.asksaveasfilename(
-            parent=self.root, title="Save the output log",
-            initialdir=self._start_dir(), defaultextension=".txt",
-            initialfile="affstamp_log.txt",
-            filetypes=[("Text files", "*.txt"), ("All files", "*.*")])
-        if not path:
-            return
-        try:
-            with open(path, "w", encoding="utf-8") as fh:
-                fh.write(self.text.get("1.0", "end-1c"))
-            self.log("Saved the log to %s" % path, "ok")
-        except OSError as exc:
-            messagebox.showerror(APP, "Could not save the log:\n%s" % exc,
-                                 parent=self.root)
-
-    def clear_log(self):
-        self.text.configure(state="normal")
-        self.text.delete("1.0", "end")
-        self.text.configure(state="disabled")
-
-    def on_close(self):
-        if self.busy and not messagebox.askyesno(
-                APP, "A step is still running.\n\nClose anyway?",
-                parent=self.root):
-            return
-        try:
-            self._collect()
-        except Exception:
-            pass
-        self.session.save()
-        self.root.destroy()
+        if self.last_output and os.path.isfile(self.last_output):
+            try:
+                os.startfile(self.last_output)
+            except OSError as e:
+                messagebox.showerror("AffStamp", str(e))
 
 
-def main() -> int:
-    try:
-        root = tk.Tk()
-    except tk.TclError as exc:
-        sys.stderr.write("cannot open a window (%s).\n"
-                         "Use AffStamp-cli.exe instead.\n" % exc)
-        return 1
-    AffStampWindow(root)
-    root.mainloop()
+def main():
+    app = AffStampGUI()
+    app._append(
+        "AffStamp %s\n\n"
+        "1. Choose the hyperlinked PDF and the scan above.\n"
+        "2. Work down the numbered steps left to right.\n"
+        "3. Everything written goes to the output folder.\n\n"
+        "The files and settings are remembered next time you open this.\n"
+        % A.VERSION, "head")
+    app.mainloop()
     return 0
 
 

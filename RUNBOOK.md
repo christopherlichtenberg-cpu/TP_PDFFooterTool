@@ -1,14 +1,13 @@
 # AffStamp — runbook
 
-Overlays the wet-ink signatures from a scanned affidavit onto the hyperlinked
-PDF, **without disturbing the hyperlinks**.
+Overlays the wet-ink signatures from the scanned affidavit onto the
+hyperlinked PDF, without disturbing the hyperlinks.
 
-A PDF hyperlink is an *annotation* — an object attached to the page, stored
-separately from the content stream that holds the drawn marks. Adding an image
-to the content stream cannot damage a link. AffStamp only ever adds, and saves
-incrementally, so the Word export survives byte-for-byte inside the output.
-
-Version 1.2.0.
+**Why this works:** in a PDF, hyperlinks are *annotations* attached to the
+page. Drawn marks live in a completely separate object, the *content
+stream*. Adding an image to the content stream cannot touch the
+annotations. Every step below is built on that, and the tool checks the
+link count before and after to prove it.
 
 ---
 
@@ -25,7 +24,7 @@ C:\Affidavit\
         DOC-002.pdf
 ```
 
-**Double-click `AffStamp.exe`.** A window opens — that is all you need.
+**Double-click `AffStamp.exe`.** A window opens - that is all you need.
 
 First time on a new machine, click **Self-test**. It should finish with
 `SELFTEST PASSED` in the Output pane. That proves the tool runs there
@@ -37,9 +36,9 @@ before you touch the real files.
 
 ```
 +-- Files ------------------------------------------------------+
-|  Hyperlinked PDF  [ ...\hyperlinked.pdf     ]  [ Browse... ]  |
-|  Scan PDF         [ ...\signed_scan.pdf     ]  [ Browse... ]  |
-|  Output folder    [ C:\Affidavit            ]  [ Change... ]  |
+|  Hyperlinked PDF  [ ...\hyperlinked.pdf     ]  [ Browse... ] |
+|  Scan PDF         [ ...\signed_scan.pdf     ]  [ Browse... ] |
+|  Output folder    [ C:\Affidavit            ]  [ Change... ] |
 +-- Settings ---------------------------------------------------+
 |  Strip height [24] mm    Edge trim [2] mm                     |
 |  Nudge  dx [0] mm (+right)    dy [0] mm (+down)               |
@@ -64,7 +63,7 @@ also points the output folder at wherever it lives.
 **Everything the tool writes goes to the Output folder.** You never type a
 path. **Open output folder** and **Open last file** are at the bottom.
 
-**Read the Output pane.** It is the same detail the command line gives —
+**Read the Output pane.** It is the same detail the command line gives -
 warnings in amber, problems in red, confirmations in green. Those warnings
 are the point of the tool, so do not skip past them. **Save log...** keeps
 a copy.
@@ -84,255 +83,288 @@ Use the two **Browse...** buttons at the top. Setting the hyperlinked PDF
 also points the output folder at the folder holding it; change that with
 **Change...** if you want the results somewhere else.
 
-The hyperlinked PDF must come from **File > Save As > PDF** in Word, or the
-Acrobat PDFMaker ribbon — **not** Print to PDF, which throws the links away
-before AffStamp ever sees the file.
-
 ---
 
-## Step 2 — Check / repair the links
+## Step 2 — Check and repair the hyperlinks
 
 Click **1. Check / repair links**.
 
-This lists every link annotation in the hyperlinked PDF and classifies it:
+This lists every link and flags four problems:
 
-| Tag | Meaning |
-|---|---|
-| `REL` | relative path — what you want |
-| `ABS` | absolute path (`C:\Users\...`) — will break on any other machine |
-| `WEB` | http / https / mailto |
-| `INTERNAL` | a jump to another page of the same document |
-
-Word writes `ABS` when the Hyperlink Base is not set
-(*File → Info → Properties → Advanced Properties → Summary → Hyperlink base*).
-Mac Word does it more or less regardless.
+- **`ABS`** — Word turned a relative link into an absolute one
+  (`file:///C:/Users/...`). These break the moment the bundle is copied
+  anywhere else.
+- **missing targets** — a link pointing at a file that does not exist,
+  usually a mistyped Document ID.
+- **case mismatches** — the link says `Exhibits/DOC-001.pdf`, the file on
+  disk is `exhibits/doc-001.PDF`. Windows and a stock Mac volume forgive
+  this; a case-sensitive volume, a network share, SharePoint or iManage do
+  not, and the reader just gets *cannot open the file*.
+- **the wrong action type** — see below.
 
 When it finishes it asks whether to repair them. Say yes only if the output
 flagged links as `ABS`. It writes `<name>_fixed.pdf` and **switches the
 Hyperlinked PDF box to that file automatically**.
 
-Repair rewrites each absolute target as a path relative to the output folder.
-Where the original path sat outside that folder — a different drive, a network
-share, another machine's user profile — it falls back to the bare file name
-and says so in the summary. Those are the ones to check by hand: they only
-resolve if the exhibit is sitting beside the affidavit.
+### How the links open
 
-If the tool reports **no link annotations at all**, stop. The export dropped
-them and there is nothing to protect; re-export from Word properly first.
+A PDF link carries an *action*, and it decides where the exhibit opens:
+
+| Action | Behaviour |
+|---|---|
+| `/GoToR` | opens the target **in the PDF viewer**, at a page |
+| `/Launch` | hands the file to the operating system, so it opens in whatever owns `.pdf` on that machine — Edge or Chrome on most modern builds. Acrobat also warns about "programs, macros, or viruses" first |
+| `/URI` | hands it to the **default browser** |
+
+`--open-in` says which you want, and the repair converts to it:
+
+```
+AffStamp-cli.exe links --base hyperlinked.pdf --fix-relative ^
+    --open-in viewer --out fixed.pdf --check
+```
+
+- `viewer` *(default)* — everything becomes `/GoToR`. Right for a bundle
+  read in Acrobat.
+- `browser` — everything becomes `/URI`. Worth considering when recipients
+  are on **Macs or tablets**: Apple's Preview does not follow PDF-to-PDF
+  links at all, and on an iPad the app only ever gets the one file you
+  opened, so the exhibits beside it are not reachable. The browser route
+  works in more places.
+- `any` — leave the action types alone and only repair the paths.
+
+> **Preview and mobile.** If a recipient opens the bundle in Preview or on an
+> iPad, cross-document links will not work regardless of how the file is
+> built — that is the reader, not the bundle. Tell recipients to open it in
+> Adobe Acrobat Reader, which is free. If you cannot rely on that, the
+> robust answer is a single merged PDF with internal links rather than
+> separate exhibit files.
 
 ---
 
-## Step 3 — Ghost overlay
+## Step 3 — Check the pagination
 
-Click **2. Ghost overlay**. This is the step that catches the problem you
-cannot fix later.
+Click **2. Ghost overlay**. This is the step most likely to sink the whole job.
 
-It writes `GHOST.pdf` — **Open last file** shows it. Open it in Acrobat and
-zoom in. The scan is drawn in **red** over the hyperlinked page:
+Inserting hyperlinks into the Word document changes character formatting,
+which can change line breaks, which can change **page** breaks. If the
+hyperlinked PDF paginates differently from the signed original, the
+initials land on the wrong pages.
 
-- Red text sitting exactly on top of the black text — the two documents line
-  up. Carry on.
-- Red text offset by the same amount everywhere — set **Nudge dx / dy** to
-  correct it.
-- Red text fanning out, or twisting across the page — the scan is skewed.
-  Deskew it first (`ocrmypdf --deskew --clean signed_scan.pdf deskewed.pdf`,
-  or ScanTailor) and use the deskewed file as the scan. No nudge will fix a
-  rotation.
-- Red text a consistent fraction larger or smaller — the scan is a different
-  page size. AffStamp scales for that automatically; the ghost is just how
-  you find out.
+It writes `GHOST.pdf` - **Open last file** shows it. Open it in Acrobat and flip through every page. Each
+page shows the hyperlinked PDF in **black** with the scan laid over it in
+**red**.
 
-`GHOST.pdf` is a check only. Never send it to anyone.
+| What you see | What it means |
+|---|---|
+| Red sitting exactly on black | Aligned and paginated identically. Good. |
+| Red consistently a little below/right of black | A uniform offset. You will correct it with a nudge in step 5. |
+| Red drifting further from black towards one edge | The scan is skewed. See "If the scan is skewed" below. |
+| Two completely different pages superimposed | **A page break has moved. Stop.** Fix the Word document so it paginates like the signed original, re-export, and start again. |
+
+Matching page counts does **not** prove matching pagination — you have to
+look.
 
 ---
 
-## Step 4 — Measure
+## Step 4 — Work out the strip height
 
 Click **3. Measure**. Output looks like:
 
 ```
-  (ignoring 3.8 mm of scanner shadow at the page edges)
-  p1    11.9-15.0mm [x 150-192mm]   19.4-22.3mm [x 25-59mm]
-  p2    11.9-15.0mm [x 150-192mm]   19.4-22.3mm [x 25-59mm]
+  p  1: 12.4-19.6mm [x 30-169]   40.4-43.2mm [x 21-43] printed
   ...
-Highest ink found          : 22.3 mm above the page edge
-Horizontal extent          : 25 - 192 mm from the left edge
-Scanner shadow at the edge : 3.8 mm
-SUGGESTED  --height 27 --edge 3.8
-
-SUGGESTED (right-hand column only - safer)
-   --height 19 --edge 3.8 --left 147 --right 195
+Tallest band unique to the scan : 20.0 mm  (page 3)
+SUGGESTED  --height 24
 ```
 
-Read it as: each line is one page, and each band is `bottom-top mm` measured
-**up from the bottom edge**, with the horizontal extent of that band in
-brackets. Above, the **11.9–15.0 mm** band on the right (x 150–192) is the
-initials; the **19.4–22.3 mm** band running in from the left margin is the
-printed footer, which your hyperlinked PDF regenerates for itself and which
-may carry a link.
+Read it as: the initials occupy 12–20 mm up from the bottom edge. The
+40–43 mm band is marked `printed` because the Word export has it too, so it
+is regenerated on the base page and must **not** be lifted.
 
 Because signatures are placed by hand, the suggestion comes from the worst
 page, not a typical one. It is written straight into the **Strip height**
 box for you; override it there if you disagree.
 
-- **Edge trim.** A flatbed scan of a page smaller than the platen leaves a
-  black band at the edge. Measure works out the trim and fills in the **Edge
-  trim** box, otherwise every page would get a black bar across the foot.
-- **The second suggestion is usually the right one.** Lifting only the
-  right-hand column cannot cover a footer link. Type its `--left` / `--right`
-  values into `AffStamp-cli.exe` if you want that box, or lower the strip
-  height in the window so it clears the printed footer.
-- **Measure also checks the hyperlinked PDF.** It reports anything printed
-  inside the strip zone, and warns about **link annotations** that would end
-  up hidden under scanned ink. A covered link still works, which is worse than
-  a broken one — it looks like a bug to whoever reads it.
+It also warns you about two things:
+
+- **scanner shadow** — a dark band along the very bottom edge of the scan.
+  It works out the trim and fills in the **Edge trim** box, otherwise every
+  page would get a black bar across the foot.
+- **links inside the strip zone** — a link that gets painted over still
+  works but is invisible. If it reports any, use a smaller height.
 
 To eyeball it, **Ruler PDF** writes a copy of the scan with a millimetre
-grid and a green box showing exactly what would be lifted. Open it in
-Acrobat, zoom the footer, adjust, re-run. It is a few seconds per pass.
+grid and a green box showing exactly what would be lifted.
 
 ---
 
-## Step 5 — Trial stamp
+## Step 5 — Trial run
 
 Click **4. Trial stamp**. Do this before the full run, every time.
 
 It writes `TEST.pdf`, covering just the pages in the **Trial pages** box.
 **Print a page and hold it against the original.** That is the only
-reliable way to catch a small offset or scanner skew.
+reliable way to catch a small offset.
 
 If the marks sit slightly off, type a correction into the **Nudge** boxes:
 
-```
-dx  positive moves the strip right
-dy  positive moves the strip down
-```
+- **dx** shifts sideways: positive = right
+- **dy** shifts vertically: positive = down
 
 The nudge is remembered and applied to every later run. Click **4. Trial
 stamp** again until a printed page lines up.
 
-If only *some* pages are off, or the scan has a stray cover sheet so the page
-numbers do not match, use an offsets file — see the Command line section.
-
-**If the ink itself looks wrong**, these are `AffStamp-cli.exe` options —
+**If the ink itself looks wrong**, these are `AffStamp-cli.exe` options -
 tell me what you are seeing and I will give you the exact line to run:
 
-| Symptom | Option |
+| Problem | Fix |
 |---|---|
-| faint initials disappearing | `--white 215` (up to 225) |
-| grey haze or dirty background | `--white 190` (down to 185) |
-| strokes look washed out | `--black 40` |
-| heavy speckle | leave despeckling on (it is on by default) |
+| Faint initials disappearing | raise `--white` to 215–225 |
+| Grey haze around the ink | lower `--white` to 185–195 |
+| Strokes look washed out | lower `--black` to 40 |
 
-Leave the ink black. `--ink` accepts a hex colour, but recolouring a
-signature on an affidavit to "look like the original blue" is exactly the
-kind of thing you do not want to have to explain later.
+Leave the ink black. It can be recoloured, but recolouring a signature on
+an affidavit to "look like the original blue" is not something you want to
+have to explain later.
 
 ---
 
-## Step 6 — The full run
+## Step 6 — Full run
 
 Tick or clear **Replace the final page with the scan**, then click
 **5. FULL STAMP**. A confirmation appears first, spelling out exactly what
-is about to happen — including a warning if the final page carries
+is about to happen - including a warning if the final page carries
 hyperlinks that the replacement would destroy.
 
-**Ticked** — the final page is swapped wholesale for the scan's, resized to
-the base page dimensions so the document keeps uniform page sizes. Use this
-when the last page carries a full execution block (signature, witness,
-jurat) that a footer strip would not capture.
+**Ticked** — the final page is swapped wholesale for the scan's final page,
+resized to match the rest of the document. Use this when the last page
+carries the full execution block and jurat rather than just initials, which
+is the normal case. You do not then need to replace it by hand in Acrobat.
 
 **Cleared** — the final page is left completely untouched, for you to
 replace yourself in Acrobat.
 
-Either way **the last page is never stamped**, because a footer strip would
-not capture an execution block.
+Either way the final page is never stamped, because a strip would not
+capture a full signature block.
 
-The scanned page has no hyperlinks of its own, so replacing it destroys any
-that were on that page. The tool lists exactly which ones went and keeps them
-separate from the integrity check, so you get:
+> **The one thing to watch:** the scanned page has no hyperlinks. If the
+> final page of the Word document had Document ID links on it, replacing
+> the page destroys them. The tool lists exactly which links went, so you
+> can re-add them in Acrobat. If the last page has no links, there is
+> nothing to worry about.
+
+Read the last lines carefully:
 
 ```
-OK - all 127 link annotations preserved.
-   (1 link(s) went with the replaced final page, as asked.)
-OK - the hyperlinked PDF is unmodified inside the output (byte-identical prefix).
+OK  - all 128 link annotations preserved.
 ```
 
-rather than a mismatch over a deletion you asked for.
+or, if you replaced the final page:
 
-It writes, into the output folder:
+```
+OK  - all 127 remaining link annotations preserved.
+      1 link(s) were removed with the replaced final page.
+```
 
-| File | What it is |
-|---|---|
-| `<name>_SIGNED.pdf` | the composite |
-| `<name>_SIGNED_links.txt` | every surviving link target, page by page |
-| `<name>_SIGNED.manifest.json` | settings, SHA-256 of both inputs and the output, which pages were stamped, and `removed_with_final_page` |
+If it says **LINK MISMATCH**, do not use the file — tell me what it says.
+If it reports pages with **no signature ink**, check those pages in the
+scan: every page should carry both marks, and a page genuinely missing one
+is something you need to know about.
 
-Keep the manifest. It is the record of what was done to produce the composite.
+It writes three files beside the hyperlinked PDF:
 
-**If you see `LINK MISMATCH ... DO NOT USE THIS FILE`, stop and say so.**
-That is the tool refusing to hand you a broken bundle.
+- `<name>_SIGNED.pdf` — the composite
+- `<name>_SIGNED_manifest.json` — a record of the run: input and output
+  SHA-256 hashes, every parameter used, per-page results, link counts,
+  and any links removed with the final page. Keep this.
+- `<name>_SIGNED_links.txt` — every link in the output
+
+The save is **incremental**: the original bytes of the hyperlinked PDF are
+left completely untouched and everything new is appended. That means you
+can prove the composite contains the Word export unmodified.
+
+---
+
+## Step 7 — Verify, then certify
+
+Open the output in Acrobat, check a few pages and the final page, and click
+some links to confirm they open the right exhibit.
+
+If the final page was replaced and it had links, re-add them now.
+
+Then certify — this is what actually stops the signatures being edited out.
+The stamped ink is baked into the page content so it cannot be clicked,
+dragged or deleted like a stamp or annotation, but Acrobat's content
+editing could still remove it. Certification makes any later alteration
+visible.
+
+`Tools → Sign & Certify → Certify (Visible or Invisible Signature)`
+
+Choose **"Form filling and annotations allowed"** or **"No changes
+allowed"**. Acrobat will offer to create a self-signed digital ID if you do
+not have one. Certifying appends an incremental update and does not touch
+the link annotations.
+
+**Certify last.**
+
+---
+
+## Never do these to the finished file
+
+Each of these will strip or break the hyperlinks:
+
+- `File → Save As Other → Optimized PDF` (Discard Objects has "discard
+  external cross references" ticked by default)
+- `File → Save As Other → Reduce File Size`
+- `Tools → Protection → Sanitize Document`
+- `Print → Adobe PDF`, or Microsoft Print to PDF
+- Re-running OCR on the output
 
 ---
 
 ## The optional audit
 
-The **Audit** button compares the wording of the scan against the wording of
-the hyperlinked PDF, page by page, and reports a similarity percentage.
+Wet-signed documents sometimes carry initialled amendments in the body of a
+page — a crossing-out, a correction, a date written in. A footer-only
+overlay would lose them.
 
-It needs a text layer in the scan, so run OCR on the **scan** first — never
-on the output:
+The **Audit** button compares the scan against the Word export and reports anything on
+the scan that the Word export does not contain, above the strip. Scanner
+skew and noise cause false positives, so check anything it reports against
+the ghost PDF before acting on it.
 
-```
-ocrmypdf --deskew --clean signed_scan.pdf scan_ocr.pdf
-```
-
-then audit against `scan_ocr.pdf`. Some difference is normal: OCR misreads,
-and the scan has handwriting the draft does not. Read any flagged page side
-by side before drawing a conclusion.
-
-Worth one run on a document you have not seen before, ignorable otherwise.
-What it buys you is a record that the wording of the composite matches what
-was actually signed.
+Worth running once on a document you have not seen before. Skip it if you
+already know there are no handwritten amendments.
 
 ---
 
-## After the stamp — in Acrobat
+## If the scan is skewed
 
-The strip is an image baked into the page content stream. It is not an
-annotation, stamp or shape, so it cannot be selected, dragged or deleted
-without full content editing.
+If the ghost overlay shows the red drifting progressively away from the
+black across the page, the scan is rotated by a fraction of a degree.
 
-**Safe:** `Tools → Sign & Certify → Certify (Visible/Invisible Signature)`.
-That writes an incremental update and leaves your link annotations
-byte-identical. Choose *"Form filling and annotations allowed"* or
-*"No changes allowed"*. Certifying — not flattening — is the real defence
-against the strip being edited out, and it is stronger evidence.
+A small skew is usually tolerable — the strip is only ~24 mm tall, so the
+drift across it is slight. Judge it from the printed trial page.
 
-**Never**, on the output file:
+If it is bad enough to matter, deskew the scan first and use the deskewed
+file as the scan:
 
-- `File → Save As Other → Optimized PDF` — *Discard external cross references*
-  is ticked by default
-- `File → Save As Other → Reduce File Size`
-- `Tools → Protection → Sanitize Document` — strips annotations wholesale
-- `Print → Adobe PDF` or Microsoft Print to PDF
-- re-running OCR on the output
+```bash
+ocrmypdf --deskew --clean signed_scan.pdf scan_deskewed.pdf
+```
 
-Then re-verify the links in Acrobat **and** in whatever viewer the recipient
-will use. Relative `/Launch` file links behave differently across Acrobat,
-Edge, Chrome and DMS viewers, and some block them entirely unless the whole
-bundle sits in a trusted folder.
+(OCR on the *scan* is fine. Never run OCR on the output.)
 
 ---
 
-## One non-technical caveat
+## File size
 
-You are producing a document that is neither the executed original nor the
-unexecuted draft. That is normal for an e-filed hyperlinked bundle, but the
-safe framing is: **the scanned PDF remains the executed affidavit; the
-hyperlinked composite is a navigable working copy.** Keep the original scan
-in the bundle, and check your court or registry rules before serving the
-composite as the affidavit itself.
+The signature layer adds roughly 20–30 KB per page, so a 40-page affidavit
+grows by under a megabyte. If it grows by far more, the scan is unusually
+noisy — say so and I will adjust the settings.
+
+Replacing the final page adds more, because that whole page becomes an
+image: expect a few hundred KB for it.
 
 ---
 
@@ -343,50 +375,36 @@ commands take options the window does not expose. Use `AffStamp-cli.exe`:
 run it with no arguments for a text menu, or
 `AffStamp-cli.exe <command> --help` for the full option list.
 
-| Command | What it does |
+| Command | Purpose |
 |---|---|
-| `links` | list and repair link targets |
-| `ghost` | the alignment overlay |
-| `measure` | find the ink, suggest height and trim |
-| `ruler` | mm grid and proposed box |
-| `stamp` | the work |
-| `audit` | compare the wording |
 | `gui` | open the window |
 | `selftest` | prove the tool works on this machine |
+| `links` | dump, repair (`--fix-relative`, `--open-in`) and check (`--check`) hyperlinks |
+| `compare` | red ghost overlay — pagination and alignment |
+| `measure` | what strip height to use |
+| `ruler` | scan copy with a millimetre grid |
+| `stamp` | do the overlay |
+| `audit` | handwriting on the scan that the Word export lacks |
 
-A full run, spelled out:
+Output paths default to the folder holding the hyperlinked PDF, so `--out`
+is optional. `--out-dir` puts them somewhere else.
 
-```
+A full run from the command line:
+
+```bash
 AffStamp-cli.exe stamp --base hyperlinked.pdf --scan signed_scan.pdf ^
-    --height 19 --edge 3.8 --left 147 --right 195 ^
-    --dx -1.5 --dy 0.8 --replace-last
+      --height 24 --edge 2 --replace-last
 ```
 
-Trial the same settings on three pages by adding `--pages 1,2,40`; the output
-is named `TEST.pdf` automatically.
-
-**Per-page corrections.** If individual pages are off, or the scan has a
-stray cover sheet, pass `--offsets offsets.csv`:
+Use `--skip-last` instead of `--replace-last` to leave the final page for
+Acrobat. `--pages 1-3,7` limits which pages are stamped. `--offsets
+offsets.csv` gives per-page corrections:
 
 ```csv
-page,dx_mm,dy_mm,scan_page
-7,0,-1.2,7
-8,1.0,0,9
+page,dx_mm,dy_mm,scan_page,height
+7,0,-1.2,7,24
+8,1.0,0,9,24
 ```
 
-`page` is the page of the hyperlinked PDF, `scan_page` the page of the scan
-to lift from. Both nudges are added to the global `--dx` / `--dy`.
-
----
-
-## If something goes wrong
-
-| Message | What to do |
-|---|---|
-| `no link annotations at all` | The Word export dropped them. Re-export with Save As, not Print to PDF. |
-| `PAGE COUNT MISMATCH` | Use `--offsets` with a `scan_page` column, or fix the scan. |
-| `strip came out blank` | The strip is above the ink, or the scan is faint. Re-run Measure, or raise `--white`. |
-| `LINK MISMATCH ... DO NOT USE THIS FILE` | Do not use it. Send me the link report. |
-| `rotated pages` | Normalise the rotation first or the strip lands on the wrong edge. |
-| `incremental save refused` | The links are still fine, but the original bytes are no longer a prefix. Usually means the input is encrypted. |
-| window will not open | Run `AffStamp-cli.exe selftest`. If that passes, the machine is missing something the window needs — use the console menu. |
+The `scan_page` column also handles a scan whose pages do not line up 1:1
+with the base — a stray cover sheet, for instance.

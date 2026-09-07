@@ -42,6 +42,29 @@ class _Widget:
         self._state = list(spec); return tuple(self._state)
     def xview_moveto(self, *a): pass
     def yview(self, *a): pass
+    def xview(self, *a): pass
+    def after(self, delay, fn=None, *args):
+        if fn is not None:
+            CALLBACKS.append((delay, lambda: fn(*args)))
+        return "id"
+    def after_idle(self, fn=None, *args):
+        if fn is not None:
+            CALLBACKS.append((0, lambda: fn(*args)))
+        return "id"
+    def after_cancel(self, *a): pass
+    def grid_columnconfigure(self, *a, **k): pass
+    def grid_rowconfigure(self, *a, **k): pass
+    def grid_remove(self): pass
+    def focus_set(self): pass
+    def update_idletasks(self): pass
+    def winfo_children(self): return list(self.children)
+    def winfo_width(self): return 900
+    def winfo_height(self): return 700
+    def winfo_screenwidth(self): return 1920
+    def winfo_screenheight(self): return 1080
+    def event_generate(self, *a, **k): pass
+    def see(self, *a): pass
+    def index(self, *a): return "1.0"
     def bind(self, *a, **k): pass
     def destroy(self): pass
     def winfo_exists(self): return True
@@ -84,6 +107,16 @@ class Tk(_Widget):
         return "id"
     def after_cancel(self, *a): pass
     def mainloop(self): pass
+    def iconbitmap(self, *a, **k): pass
+    def wm_iconbitmap(self, *a, **k): pass
+    def resizable(self, *a): pass
+    def columnconfigure(self, *a, **k): pass
+    def rowconfigure(self, *a, **k): pass
+    def report_callback_exception(self, *a): pass
+    def withdraw(self): pass
+    def deiconify(self): pass
+    def lift(self): pass
+    def option_add(self, *a, **k): pass
     def destroy(self): self.destroyed = True
     def update(self): pass
 
