@@ -1,4 +1,4 @@
-PDFLinkCheck 1.2.0
+PDFLinkCheck 1.3.0
 ==================
 
 Checks that the hyperlinks in a PDF are RELATIVE, and that they open in the
@@ -104,6 +104,30 @@ WHAT IT IS LOOKING FOR
 
    A bundle built for one policy will fail a check under another, which is
    the point - it tells you the bundle is not what you thought it was.
+
+
+4. THAT FOLLOWING A LINK DOES NOT CLOSE WHAT YOU ARE READING.
+
+   A PDF link can say whether the exhibit opens in its OWN window, or in
+   the window you are already in - which closes the submission and replaces
+   it with the exhibit. That setting is called /NewWindow, and if it is not
+   set, the reader decides: Acrobat follows Preferences > Documents > "open
+   cross-document links in same window", which differs from desk to desk.
+
+   That is why the same bundle behaves one way on your machine and another
+   way on a colleague's, and why some links in a bundle behave differently
+   from others - the ones Word wrote may carry the setting while the ones
+   added later do not.
+
+   The tool pins it, so no reader has to guess:
+
+     --window new    (the default) the exhibit always opens in its own
+                     window; following a link never closes the submission
+     --window same   always replace the current document
+     --window any    do not check or change it
+
+   --fix pins it on every file link, including ones it did not otherwise
+   need to touch.
 
 
 READING THE OUTPUT

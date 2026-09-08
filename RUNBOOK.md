@@ -132,6 +132,21 @@ AffStamp-cli.exe links --base hyperlinked.pdf --fix-relative ^
   works in more places.
 - `any` — leave the action types alone and only repair the paths.
 
+### Whether a link closes what you are reading
+
+A link can also say *where* the exhibit opens. `/NewWindow true` gives it its
+own window; `/NewWindow false` replaces the document you are reading, closing
+the submission. **If it is not set, the reader decides** — Acrobat follows
+*Preferences → Documents → open cross-document links in same window*, which
+differs from machine to machine. That is why the same bundle behaves one way
+on your desk and another way on a colleague's, and why some links in one
+bundle behave differently from others.
+
+`--window new` is the default and pins every file link to its own window, so
+following one never closes the submission. `--window same` pins the
+opposite; `--window any` leaves it to the reader. The repair pins it on
+every file link, including ones it did not otherwise need to touch.
+
 > **Preview and mobile.** If a recipient opens the bundle in Preview or on an
 > iPad, cross-document links will not work regardless of how the file is
 > built — that is the reader, not the bundle. Tell recipients to open it in

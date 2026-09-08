@@ -231,6 +231,23 @@ def test_links_policies(work):
         check("%s: no leading ./" % mode,
               not any(t.startswith("./") for _, t in local), local)
 
+    # every rewritten link must pin /NewWindow, or following one can close
+    # the submission and replace it with the exhibit
+    for mode in ("viewer", "browser", "any"):
+        out = os.path.join(work, "pol_" + mode, "fixed.pdf")
+        doc = pymupdf.open(out)
+        flags = {}
+        for page in doc:
+            for link in plc.read_links(doc, page):
+                if link["action"] in ("/GoToR", "/Launch"):
+                    flags[link["target"]] = link["new_window"]
+        doc.close()
+        if mode == "browser":
+            check("browser: no file links left to pin", not flags, flags)
+        else:
+            check("%s: every file link pins a new window" % mode,
+                  flags and all(v is True for v in flags.values()), flags)
+
     fitted = actions(os.path.join(work, "pol_viewer", "fixed.pdf"))
     doc = pymupdf.open(os.path.join(work, "pol_viewer", "fixed.pdf"))
     blobs = []

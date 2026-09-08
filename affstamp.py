@@ -55,7 +55,7 @@ except AttributeError:                  # pragma: no cover
     _TRANSPOSE = Image.TRANSPOSE
     _BOX = Image.BOX
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 BANNER = "=" * 72
 
 MMPT = 72.0 / 25.4
@@ -420,6 +420,16 @@ def _fix_one_link(page, link, rel, open_in):
     page.insert_link(new)
 
 
+def _pin_window(doc, window):
+    """Delegates to pdflinkcheck: pin /NewWindow on every file link.
+
+    Without it Acrobat follows its own preference, and a machine with "open
+    cross-document links in same window" ticked closes the submission and
+    replaces it with the exhibit.
+    """
+    return plc.apply_window(doc, window)
+
+
 def _set_fit_destinations(doc):
     """Give every /GoToR a sane destination.
 
@@ -465,8 +475,10 @@ def cmd_links(a):
     if a.dump or not (a.fix_relative or a.check):
         for r in rows:
             flag = "ABS" if uri_to_path(r["target"]) else "   "
-            print("  %s p%3d  %-8s  %s"
-                  % (flag, r["page_no"], r["action"], r["target"]))
+            win = {True: "new win ", False: "same win", None: "        "}[
+                r.get("new_window")]
+            print("  %s p%3d  %-8s %s  %s"
+                  % (flag, r["page_no"], r["action"], win, r["target"]))
 
     # The action type decides whether an exhibit opens in the PDF viewer or
     # is handed to a browser - report it, whatever else is wrong.
@@ -480,11 +492,22 @@ def cmd_links(a):
         print("!! %d link(s) do not open in the %s: %s"
               % (len(wrong_action), open_in,
                  ", ".join(sorted({r["action"] for r in wrong_action}))))
-    if absolute or wrong_action:
+    window = getattr(a, "window", "new")
+    unpinned = [r for r in rows
+                if plc.window_problem(r, window) and r["target"]
+                and not plc.WEB.match(r["target"])]
+    if unpinned and window != "any":
+        print("!! %d link(s) do not pin /NewWindow. On a reader with 'open "
+              "cross-document links" % len(unpinned))
+        print("   in same window' ticked, following one CLOSES this document "
+              "and replaces it")
+        print("   with the exhibit.")
+    if absolute or wrong_action or unpinned:
         print("   Re-run with: --fix-relative --open-in %s --out <file>"
               % open_in)
     elif not a.check:
-        print("\nNo absolute paths, and every link opens in the %s." % open_in)
+        print("\nNo absolute paths, every link opens in the %s, and none will "
+              "replace this document." % open_in)
 
     if a.fix_relative:
         if not a.out:
@@ -525,6 +548,10 @@ def cmd_links(a):
                      plc.POLICY[open_in]["want"] or "action unchanged"))
 
         _set_fit_destinations(doc)
+        pinned = _pin_window(doc, getattr(a, "window", "new"))
+        if pinned:
+            print("   set /NewWindow on %d link(s) - following one will not "
+                  "close the document being read" % pinned)
         doc.save(a.out, garbage=3, deflate=True)
         print("\nRewrote %d link(s). Wrote %s" % (fixed, a.out))
         print("Use THIS file as --base from here on.")
@@ -1304,6 +1331,12 @@ def build_parser():
     p.add_argument("--allow-parent", action="store_true",
                    help="permit ../ in rewritten paths instead of "
                         "falling back to the bare filename")
+    p.add_argument("--window", choices=plc.WINDOW, default="new",
+                   metavar="{new,same,any}",
+                   help="whether an exhibit opens in its own window. new "
+                        "(default): pin /NewWindow true, so following a link "
+                        "never closes the submission. same: pin it false. "
+                        "any: leave it to each reader's preferences.")
     p.add_argument("--open-in", choices=plc.OPEN_IN, default="viewer",
                    metavar="{viewer,browser,any}",
                    help="how local links should open. viewer (default): "

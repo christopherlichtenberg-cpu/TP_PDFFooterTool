@@ -158,7 +158,7 @@ def test_verdicts(work):
     verdicts = {}
     for page in doc:
         for link in P.read_links(doc, page):
-            verdicts[link["target"]] = P.classify(link)[0]
+            verdicts[link["target"]] = P.classify(link, window="any")[0]
     doc.close()
 
     check("absolute /URI fails",
@@ -274,7 +274,8 @@ def test_resolution(work):
     doc.save(bundle); doc.close()
     check("a well-formed link to a miscased file still fails",
           P.main([bundle]) == 1)
-    check("--no-resolve lets it pass", P.main([bundle, "--no-resolve"]) == 0)
+    check("--no-resolve lets it pass",
+          P.main([bundle, "--no-resolve", "--window", "any"]) == 0)
 
 
 def actions_of(path):
@@ -332,6 +333,76 @@ def test_open_in(work):
           and P.main([browser_pdf, "--open-in", "any", "--no-pause"]) == 0)
 
 
+def window_flags(path):
+    doc = fitz.open(path)
+    out = {}
+    for page in doc:
+        for link in P.read_links(doc, page):
+            if link["action"] in ("/GoToR", "/Launch"):
+                out[link["target"]] = link["new_window"]
+    doc.close()
+    return out
+
+
+def test_new_window(work):
+    section("/NewWindow - never replace the document being read")
+    room = os.path.join(work, "window")
+    os.makedirs(room, exist_ok=True)
+    bundle = os.path.join(room, "b.pdf")
+    make_bundle(bundle)
+    make_exhibits(room)
+
+    check("unset /NewWindow is detected as unset",
+          all(v is None for v in window_flags(bundle).values()),
+          window_flags(bundle))
+    check("an unpinned bundle fails the default policy",
+          P.main([bundle, "--no-pause"]) == 1)
+    # A bundle whose ONLY fault is the unpinned window.
+    clean = os.path.join(room, "clean.pdf")
+    doc = fitz.open()
+    doc.new_page(width=200, height=200)
+    doc[0].insert_link({"kind": fitz.LINK_GOTOR,
+                        "from": fitz.Rect(10, 10, 100, 30),
+                        "file": "Exhibits/DOC-002.pdf", "page": 0,
+                        "to": fitz.Point(0, 0)})
+    doc.save(clean); doc.close()
+    check("an otherwise perfect link still fails on the unpinned window",
+          P.main([clean, "--no-pause"]) == 1)
+    check("--window any ignores it",
+          P.main([clean, "--window", "any", "--no-pause"]) == 0)
+
+    P.main([bundle, "--fix", "--no-pause"])
+    fixed = os.path.join(room, "b_fixed.pdf")
+    flags = window_flags(fixed)
+    check("every file link is pinned to a new window",
+          flags and all(v is True for v in flags.values()), flags)
+    check("the pinned bundle passes", P.main([fixed, "--no-pause"]) == 0)
+
+    doc = fitz.open(fixed)
+    blobs = []
+    for page in doc:
+        for xref, atype, _ in page.annot_xrefs():
+            if atype == fitz.PDF_ANNOT_LINK:
+                blobs.append(doc.xref_object(xref, compressed=True))
+    doc.close()
+    check("the raw action carries /NewWindow true",
+          all("/NewWindow true" in b for b in blobs if "/GoToR" in b))
+
+    # the opposite policy must be reachable, and must then fail the default
+    room2 = os.path.join(work, "window_same")
+    os.makedirs(room2, exist_ok=True)
+    same = os.path.join(room2, "b.pdf")
+    make_bundle(same)
+    make_exhibits(room2)
+    P.main([same, "--fix", "--window", "same", "--no-pause"])
+    same_fixed = os.path.join(room2, "b_fixed.pdf")
+    check("--window same pins false",
+          all(v is False for v in window_flags(same_fixed).values()),
+          window_flags(same_fixed))
+    check("a same-window bundle fails the new-window default",
+          P.main([same_fixed, "--no-pause"]) == 1)
+
+
 def main():
     print("PDFLinkCheck %s tests" % P.VERSION)
     work = tempfile.mkdtemp(prefix="pdflinkcheck_tests_")
@@ -344,6 +415,7 @@ def main():
         test_fix(work)
         test_resolution(work)
         test_open_in(work)
+        test_new_window(work)
     finally:
         shutil.rmtree(work, ignore_errors=True)
 

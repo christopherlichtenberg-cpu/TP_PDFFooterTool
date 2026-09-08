@@ -54,7 +54,7 @@ try:
 except ImportError:                                     # older wheels
     import fitz                                         # type: ignore
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 WEB = re.compile(r"^(https?|mailto|ftp|tel):", re.I)
 DRIVE = re.compile(r"^/?[A-Za-z]:[\\/]")                # C:\x   /C:/x
@@ -109,8 +109,16 @@ def read_links(doc, page):
 
         target = (find_string(blob, "UF") or find_string(blob, "F")
                   or find_string(blob, "URI") or "")
+
+        # /NewWindow decides whether the exhibit opens in its own window or
+        # REPLACES the document you are reading. Absent means the reader
+        # decides, from a per-machine preference - which is why the same
+        # bundle behaves differently on different desks.
+        m = re.search(r"/NewWindow\s+(true|false)", blob)
+        new_window = (m.group(1) == "true") if m else None
+
         out.append({"xref": xref, "action": action, "target": target,
-                    "page": page.number + 1})
+                    "new_window": new_window, "page": page.number + 1})
     return out
 
 
@@ -140,7 +148,28 @@ POLICY = {
 }
 
 
-def classify(link, allow_launch=False, open_in="viewer"):
+WINDOW = ("new", "same", "any")
+
+WINDOW_WORD = {True: "a new window", False: "the same window", None: "unset"}
+
+
+def window_problem(link, window):
+    """Will this link replace the document the reader is looking at?"""
+    if window == "any" or link["action"] not in ("/GoToR", "/Launch"):
+        return None
+    got = link.get("new_window")
+    want = (window == "new")
+    if got is want:
+        return None
+    if got is None:
+        return ("/NewWindow unset - the reader decides, and where 'open "
+                "cross-document links in same window' is ticked this REPLACES "
+                "the document being read")
+    return ("/NewWindow is %s, but this bundle wants %s"
+            % (str(got).lower(), WINDOW_WORD[want]))
+
+
+def classify(link, allow_launch=False, open_in="viewer", window="new"):
     """-> (verdict, reason).  verdict is ok / warn / fail.
 
     `open_in` is the policy the bundle is meant to follow:
@@ -182,9 +211,15 @@ def classify(link, allow_launch=False, open_in="viewer"):
             problems.append("/GoToR opens in the PDF viewer - this bundle is "
                             "meant to open links in a browser")
 
+    win = window_problem(link, window)
+    if win:
+        problems.append(win)
+
     if problems:
         return "fail", "; ".join(problems)
-    return "ok", "relative %s - %s" % (action, rule["why"])
+    tail = "" if window == "any" else ", opens in %s" % WINDOW_WORD[
+        window == "new"]
+    return "ok", "relative %s - %s%s" % (action, rule["why"], tail)
 
 
 def resolve_target(target, base_dir):
@@ -299,7 +334,7 @@ def check(path, args):
         for link in read_links(doc, page):
             total += 1
             verdict, reason = classify(link, args.allow_launch,
-                                       args.open_in)
+                                       args.open_in, args.window)
 
             # A link can be perfectly formed and still not open, because
             # nothing of that name is sitting where it points.
@@ -366,7 +401,10 @@ def fix(path, args):
             info = raw.get(link.get("xref"))
             if not info:
                 continue
-            if classify(info, args.allow_launch, args.open_in)[0] != "fail":
+            # The window setting is applied to every link afterwards, so
+            # it alone is not a reason to rewrite one.
+            if classify(info, args.allow_launch, args.open_in,
+                        "any")[0] != "fail":
                 continue
             target = info["target"]
             if not target or WEB.match(target):
@@ -401,7 +439,10 @@ def fix(path, args):
                 print("  p%d: could not rewrite %s (%s)"
                       % (page.number + 1, target, exc))
 
-    if not changed:
+    windowed = apply_window(doc, args.window)
+    changed_total = changed + windowed
+
+    if not changed_total:
         print("  nothing that --fix can repair")
         doc.close()
         return 0
@@ -422,12 +463,16 @@ def fix(path, args):
     out = os.path.splitext(path)[0] + "_fixed.pdf"
     doc.save(out, garbage=3, deflate=True)
     doc.close()
-    print("  rewrote %d link(s) as %s  ->  %s"
-          % (changed,
-             {"viewer": "relative /GoToR (opens in the PDF viewer)",
-              "browser": "relative /URI (opens in a browser)",
-              "any": "relative paths, action types unchanged"}[args.open_in],
-             os.path.basename(out)))
+    if changed:
+        print("  rewrote %d link(s) as %s"
+              % (changed,
+                 {"viewer": "relative /GoToR (opens in the PDF viewer)",
+                  "browser": "relative /URI (opens in a browser)",
+                  "any": "relative paths, action types unchanged"}[args.open_in]))
+    if windowed:
+        print("  pinned /NewWindow on %d link(s), so following one will not "
+              "close the document being read" % windowed)
+    print("  wrote %s" % os.path.basename(out))
     print("  now re-check it:  %s \"%s\""
           % (prog_name(), os.path.basename(out)))
     return changed
@@ -438,6 +483,34 @@ def prog_name():
     if getattr(sys, "frozen", False):
         return os.path.basename(sys.executable)
     return "py " + os.path.basename(__file__)
+
+
+def apply_window(doc, window):
+    """Pin /NewWindow on every file link, so no reader has to guess.
+
+    Left to itself, Acrobat follows its own preference, and a machine with
+    "open cross-document links in same window" ticked will close the
+    submission and replace it with the exhibit.
+    """
+    if window == "any":
+        return 0
+    value = "true" if window == "new" else "false"
+    changed = 0
+    for page in doc:
+        for xref, atype, _ in page.annot_xrefs():
+            if atype != fitz.PDF_ANNOT_LINK:
+                continue
+            try:
+                blob = doc.xref_object(xref, compressed=True)
+                if "/GoToR" not in blob and "/Launch" not in blob:
+                    continue
+                if re.search(r"/NewWindow\s+" + value, blob):
+                    continue
+                doc.xref_set_key(xref, "A/NewWindow", value)
+                changed += 1
+            except Exception:
+                pass
+    return changed
 
 
 def collect(paths):
@@ -473,6 +546,13 @@ def main(argv=None):
                          "which hands it to the default browser. any: leave "
                          "the action types as they are and only check the "
                          "paths. --fix converts to whichever you choose.")
+    ap.add_argument("--window", choices=WINDOW, default="new",
+                    metavar="{new,same,any}",
+                    help="whether an exhibit opens in its own window. new "
+                         "(default): pin /NewWindow true, so following a link "
+                         "never closes the document being read. same: pin it "
+                         "false. any: do not check or change it, which leaves "
+                         "the behaviour up to each reader's preferences.")
     ap.add_argument("--no-resolve", action="store_true",
                     help="do not check that each target actually exists next "
                          "to the PDF (use when the exhibits are not to hand)")
