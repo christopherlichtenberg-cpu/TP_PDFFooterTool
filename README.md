@@ -43,14 +43,25 @@ and any links removed with a replaced final page.
 
 ## pdflinkcheck.py — standalone link auditor
 
-Separate one-file tool, not part of the AffStamp build. Checks that a PDF's
-hyperlinks are **relative** and carry a **`/GoToR`** action, so exhibits open
-in the PDF viewer rather than a browser.
+Separate tool, shipped as its own `PDFLinkCheck.exe`. For every hyperlink in
+a PDF it reports, in one row: where it opens (PDF viewer / browser / the
+machine's default app / this document), whether it opens in a new window,
+the same window, or leaves that to the reader, whether the path is relative,
+and whether the target file actually exists — case included — in the folder
+beside the PDF.
+
+`--fix` converts every link to the type you choose (`--open-in
+viewer|browser|any`), pins the window behaviour (`--window new|same|any`),
+makes paths relative, finds files Word recorded under the author's own path
+by following that path's folders into the bundle, and corrects the capitals.
+It lists anything it could not find. Double-clicking the exe walks through
+the same choices without a command line.
 
 ```
-py pdflinkcheck.py bundle.pdf            # check
-py pdflinkcheck.py C:\Affidavit           # check every PDF in a folder
-py pdflinkcheck.py bundle.pdf --fix       # rewrite -> bundle_fixed.pdf
+PDFLinkCheck.exe bundle.pdf                          # report
+PDFLinkCheck.exe C:\Affidavit                         # every PDF in a folder
+PDFLinkCheck.exe bundle.pdf --fix                    # PDF viewer, new window
+PDFLinkCheck.exe bundle.pdf --fix --open-in browser  # everything to the browser
 ```
 
 Exit code 1 if anything failed, so it can gate a process.

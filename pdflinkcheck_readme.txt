@@ -1,4 +1,4 @@
-PDFLinkCheck 1.3.0
+PDFLinkCheck 1.4.0
 ==================
 
 Checks that the hyperlinks in a PDF are RELATIVE, and that they open in the
@@ -27,17 +27,53 @@ HOW TO USE IT
 
 Easiest: drag a PDF straight onto PDFLinkCheck.exe.
 
-Or double-click it and paste in a path when it asks. It will offer to fix
-anything it finds.
+Or double-click it and paste in a path when it asks. After the report it
+asks whether to repair or change the links, and if you say yes:
+
+    How should the links open?
+      1) in the PDF viewer          (recommended)
+      2) in the web browser
+      3) leave the link types alone - only fix paths and capitals
+
+    Should an exhibit open in its own window?
+      1) yes - never close the submission  (recommended)
+      2) no - replace the submission with the exhibit
+      3) leave it to each reader's own settings
+
+Press Enter to take the recommended answer. It then shows the report for
+the fixed file, so you can see what you ended up with.
 
 Or from a command prompt:
 
     PDFLinkCheck.exe bundle.pdf              check one file
     PDFLinkCheck.exe C:\Affidavit            check every PDF in a folder
-    PDFLinkCheck.exe bundle.pdf --fix        rewrite -> bundle_fixed.pdf
+    PDFLinkCheck.exe bundle.pdf --fix        repair -> bundle_fixed.pdf
+
+    PDFLinkCheck.exe bundle.pdf --fix --open-in browser
+    PDFLinkCheck.exe bundle.pdf --fix --open-in viewer --window new
 
 The fix never overwrites your file. It writes a new one alongside it, named
-<name>_fixed.pdf. Always re-run the check on the fixed file.
+<name>_fixed.pdf.
+
+
+WHAT --fix DOES TO EACH LINK
+----------------------------
+
+  - converts it to the link type you chose
+  - makes an absolute path relative
+  - FINDS THE FILE: Word records the path on the author's machine, such as
+    C:\Users\someone\Matter\Documents\DOC-005.pdf. The fixer follows that
+    path's own folders into this bundle - Matter\Documents\DOC-005.pdf,
+    then Documents\DOC-005.pdf - and uses the first that exists. It never
+    goes looking for any file of the same name, so a superseded copy in an
+    Archive folder will not be picked up by accident. It lists every file it
+    found this way so you can confirm they are the right documents.
+  - corrects the capitals to match the file on disk
+  - pins the window setting you chose
+
+What it cannot do is supply a document that is not there. Anything still
+missing afterwards is listed by name at the end - put the file in place,
+or correct the link in the Word document and export again.
 
 
 WHAT IT IS LOOKING FOR
@@ -132,6 +168,36 @@ WHAT IT IS LOOKING FOR
 
 READING THE OUTPUT
 ------------------
+
+Every link gets one row:
+
+  STATUS PAGE  OPENS IN      WINDOW          PATH      FILE        TARGET
+  ok     p1    PDF viewer    new window      relative  found       Documents/DOC-001.pdf
+  FAIL   p1    PDF viewer    SAME window     relative  found       Documents/DOC-002.pdf
+  FAIL   p1    default app   reader decides  relative  found       Documents/DOC-003.pdf
+  FAIL   p1    browser       -               relative  MISSING     Documents/DOC-004.pdf
+  FAIL   p1    browser       -               ABSOLUTE  -           file:///C:/Users/...
+  FAIL   p2    PDF viewer    reader decides  relative  wrong case  Documents/DOC-006.pdf
+
+  OPENS IN   PDF viewer      /GoToR - opens in Acrobat or whichever PDF
+                             program is reading the bundle
+             browser         /URI - handed to the web browser
+             default app     /Launch - handed to Windows, which opens it in
+                             whatever program owns .pdf on that machine
+             this document   a jump to another page of the same PDF
+
+  WINDOW     new window      always opens beside the submission
+             SAME window     always closes the submission and replaces it
+             reader decides  not set - depends on each person's Acrobat
+                             settings, so it varies from desk to desk
+             -               does not apply (browser and internal links)
+
+  PATH       relative / ABSOLUTE / web
+
+  FILE       found / MISSING / wrong case, checked against the folder the
+             PDF is in. "-" where it does not apply.
+
+Below the table, each problem is explained in a sentence.
 
     FAIL   must be fixed before the bundle is sent anywhere
     warn   look at it and decide - a link to legislation on the web is a

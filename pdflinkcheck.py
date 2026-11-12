@@ -54,7 +54,7 @@ try:
 except ImportError:                                     # older wheels
     import fitz                                         # type: ignore
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 
 WEB = re.compile(r"^(https?|mailto|ftp|tel):", re.I)
 DRIVE = re.compile(r"^/?[A-Za-z]:[\\/]")                # C:\x   /C:/x
@@ -117,8 +117,17 @@ def read_links(doc, page):
         m = re.search(r"/NewWindow\s+(true|false)", blob)
         new_window = (m.group(1) == "true") if m else None
 
+        # Where it sits on the page, so the report reads top to bottom the
+        # way the document does. PDF y runs upwards, so larger is higher.
+        top = 0.0
+        m = re.search(r"/Rect\s*\[\s*([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)"
+                      r"\s+([-\d.]+)", blob)
+        if m:
+            top = max(float(m.group(2)), float(m.group(4)))
+
         out.append({"xref": xref, "action": action, "target": target,
-                    "new_window": new_window, "page": page.number + 1})
+                    "new_window": new_window, "page": page.number + 1,
+                    "top": top})
     return out
 
 
@@ -271,17 +280,8 @@ def resolve_target(target, base_dir):
     return ("found", "") if exact else ("case", "/".join(actual))
 
 
-def relative_to(target, base_dir):
-    """Absolute target -> path relative to base_dir, else the bare file name.
-
-    A target that is ALREADY relative is returned untouched (bar backslashes).
-    Running it through relpath would resolve it against the working directory
-    and flatten "Exhibits/DOC-001.pdf" to "DOC-001.pdf", silently breaking a
-    bundle whose exhibits live in a subfolder.
-    """
-    if not is_absolute(target):
-        return re.sub(r"/{2,}", "/", target.replace("\\", "/"))
-
+def _clean_absolute(target):
+    """file:///C:/x%20y/z.pdf, /C:/x/z.pdf, C:\\x\\z.pdf -> C:/x y/z.pdf"""
     raw = target
     if FILE_URI.match(raw):
         raw = re.sub(r"^[Ff][Ii][Ll][Ee]:/*", "", raw)
@@ -295,6 +295,81 @@ def relative_to(target, base_dir):
         raw = raw[1:]
     if re.match(r"^[A-Za-z]\|", raw):
         raw = raw.replace("|", ":", 1)
+    return raw
+
+
+def locate_in_bundle(target, base_dir):
+    """Where does an absolute target's file live in THIS bundle, if anywhere?
+
+    Word records the path on the author's machine:
+        file:///C:/Users/someone/Matter/Documents/DOC-005.pdf
+    The bundle here is laid out the same way under some other folder. Try the
+    longest trailing part of that path first - Matter/Documents/DOC-005.pdf,
+    then Documents/DOC-005.pdf, then DOC-005.pdf - against the folder holding
+    the PDF, and take the first that exists.
+
+    Matching on the tail of the ORIGINAL path, rather than searching the
+    bundle for any file of that name, means a superseded copy sitting in an
+    Archive folder is never picked up by accident.
+
+    Returns the relative path spelled as it is on disk, or None.
+    """
+    raw = posixpath.normpath(_clean_absolute(target))
+    parts = [p for p in raw.split("/")
+             if p and p != "." and not re.match(r"^[A-Za-z]:$", p)]
+    for i in range(len(parts)):
+        status, detail = resolve_target("/".join(parts[i:]), base_dir)
+        if status == "found":
+            return "/".join(parts[i:])
+        if status == "case":
+            return detail
+    return None
+
+
+def repair_target(target, base_dir, resolve=True):
+    """Work out what a link's target should become.
+
+    Returns (new_target, how) where how is a set drawn from:
+        relative   an absolute path was made relative
+        located    ...and the file was found in the bundle under part of its
+                   original folder, rather than guessed at
+        cased      the capitals were corrected to match the file on disk
+        guessed    the file could not be found, so only the bare file name
+                   is left - that link will not open until the file is there
+    """
+    how = set()
+    rel = relative_to(target, base_dir)
+    if is_absolute(target):
+        how.add("relative")
+        if resolve and resolve_target(rel, base_dir)[0] == "missing":
+            found = locate_in_bundle(target, base_dir)
+            if found:
+                rel = found
+                how.add("located")
+    while rel.startswith("./"):
+        rel = rel[2:]
+    if resolve:
+        status, detail = resolve_target(rel, base_dir)
+        if status == "case":
+            rel = detail
+            how.add("cased")
+        elif status == "missing" and "relative" in how:
+            how.add("guessed")
+    return rel, how
+
+
+def relative_to(target, base_dir):
+    """Absolute target -> path relative to base_dir, else the bare file name.
+
+    A target that is ALREADY relative is returned untouched (bar backslashes).
+    Running it through relpath would resolve it against the working directory
+    and flatten "Exhibits/DOC-001.pdf" to "DOC-001.pdf", silently breaking a
+    bundle whose exhibits live in a subfolder.
+    """
+    if not is_absolute(target):
+        return re.sub(r"/{2,}", "/", target.replace("\\", "/"))
+
+    raw = _clean_absolute(target)
 
     def split(p):
         m = re.match(r"^([A-Za-z]):(.*)$", p)
@@ -315,6 +390,37 @@ def relative_to(target, base_dir):
     return name if rel.startswith("..") else rel
 
 
+OPENS = {"/GoToR": "PDF viewer", "/URI": "browser", "/Launch": "default app",
+         "/GoTo": "this document", "(none)": "this document",
+         "/Named": "named action"}
+WINDOW_COL = {True: "new window", False: "SAME window", None: "reader decides"}
+FILE_COL = {"found": "found", "case": "wrong case", "missing": "MISSING",
+            "skip": "-", "unchecked": "not checked"}
+POLICY_WORDS = {"viewer": "PDF viewer", "browser": "browser",
+                "any": "any link type"}
+WINDOW_WORDS = {"new": "new window", "same": "same window",
+                "any": "any window setting"}
+
+
+def describe(link, file_status):
+    """(opens in, window, path, file) - plain words for one link."""
+    action, target = link["action"], link["target"] or ""
+    opens = OPENS.get(action, action)
+    window = (WINDOW_COL[link.get("new_window")]
+              if action in ("/GoToR", "/Launch") else "-")
+    if action in ("/GoTo", "(none)"):
+        path = "-"
+    elif WEB.match(target):
+        path = "web"
+    elif not target:
+        path = "none"
+    elif is_absolute(target):
+        path = "ABSOLUTE"
+    else:
+        path = "relative"
+    return opens, window, path, FILE_COL.get(file_status, file_status)
+
+
 def check(path, args):
     """-> (total, failures)"""
     try:
@@ -329,17 +435,23 @@ def check(path, args):
         return 0, 1
 
     base_dir = os.path.dirname(os.path.abspath(path)) or os.getcwd()
-    groups, total = {}, 0
+    groups, total, rows = {}, 0, []
     for page in doc:
         for link in read_links(doc, page):
             total += 1
+            file_status = "skip"
             verdict, reason = classify(link, args.allow_launch,
                                        args.open_in, args.window)
 
             # A link can be perfectly formed and still not open, because
             # nothing of that name is sitting where it points.
-            if not args.no_resolve:
+            if args.no_resolve:
+                if (link["target"] and not WEB.match(link["target"])
+                        and not is_absolute(link["target"])):
+                    file_status = "unchecked"
+            else:
                 status, detail = resolve_target(link["target"], base_dir)
+                file_status = status
                 extra = ""
                 if status == "missing":
                     extra = ("TARGET NOT FOUND beside this PDF - nothing of "
@@ -355,14 +467,30 @@ def check(path, args):
 
             key = (verdict, link["action"], link["target"], reason)
             groups.setdefault(key, []).append(link["page"])
+            rows.append((verdict, link["page"], link, file_status))
 
     fails = sum(len(v) for k, v in groups.items() if k[0] == "fail")
     warns = sum(len(v) for k, v in groups.items() if k[0] == "warn")
 
-    print("%s   %d page%s, %d link%s   [links should open in: %s]"
+    print("%s   %d page%s, %d link%s   [checking for: %s, %s]"
           % (os.path.basename(path), doc.page_count,
              "" if doc.page_count == 1 else "s",
-             total, "" if total == 1 else "s", args.open_in))
+             total, "" if total == 1 else "s",
+             POLICY_WORDS[args.open_in], WINDOW_WORDS[args.window]))
+    if total and not getattr(args, "brief", False):
+        fmt = "  %-6s %-5s %-13s %-15s %-9s %-11s %s"
+        rows.sort(key=lambda r: (r[1], -r[2].get("top", 0.0)))
+        print("")
+        print(fmt % ("STATUS", "PAGE", "OPENS IN", "WINDOW", "PATH", "FILE",
+                     "TARGET"))
+        for verdict_, pno, link, file_status in rows:
+            opens, window, kind, found = describe(link, file_status)
+            print(fmt % ({"fail": "FAIL", "warn": "warn", "ok": "ok"}[verdict_],
+                         "p%d" % pno, opens, window, kind, found,
+                         link["target"] or "-"))
+        if any(r[0] != "ok" for r in rows) or args.verbose:
+            print("")
+            print("  PROBLEMS")
     if not total:
         print("  NO LINK ANNOTATIONS AT ALL - if you expected some, the export "
               "dropped them (use Save As PDF, not Print to PDF)")
@@ -372,6 +500,8 @@ def check(path, args):
     rank = {"fail": 0, "warn": 1, "ok": 2}
     for (verdict, action, target, reason), pages in sorted(
             groups.items(), key=lambda kv: (rank[kv[0][0]], kv[0][2])):
+        if getattr(args, "brief", False):
+            break                       # the table was already shown
         if verdict == "ok" and not args.verbose:
             continue
         where = ("p%d" % pages[0] if len(pages) == 1
@@ -393,6 +523,8 @@ def fix(path, args):
     doc = fitz.open(path)
     base_dir = os.path.dirname(os.path.abspath(path)) or os.getcwd()
     changed = 0
+    notes = []
+    resolve = not args.no_resolve
 
     for page in doc:
         raw = {l["xref"]: l for l in read_links(doc, page)}
@@ -401,17 +533,20 @@ def fix(path, args):
             info = raw.get(link.get("xref"))
             if not info:
                 continue
-            # The window setting is applied to every link afterwards, so
-            # it alone is not a reason to rewrite one.
-            if classify(info, args.allow_launch, args.open_in,
-                        "any")[0] != "fail":
-                continue
             target = info["target"]
             if not target or WEB.match(target):
                 continue
-            rel = relative_to(target, base_dir)
-            while rel.startswith("./"):
-                rel = rel[2:]
+            # The window setting is applied to every link afterwards, so it
+            # alone is not a reason to rewrite one. Wrong capitals are: the
+            # file is right there under its real name.
+            wrong = classify(info, args.allow_launch, args.open_in,
+                             "any")[0] == "fail"
+            miscased = (resolve and not is_absolute(target)
+                        and resolve_target(target, base_dir)[0] == "case")
+            if not wrong and not miscased:
+                continue
+            rel, how = repair_target(target, base_dir, resolve)
+            notes.append((page.number + 1, target, rel, how))
 
             if args.open_in == "browser":
                 new = {"kind": fitz.LINK_URI, "from": link["from"], "uri": rel}
@@ -472,10 +607,53 @@ def fix(path, args):
     if windowed:
         print("  pinned /NewWindow on %d link(s), so following one will not "
               "close the document being read" % windowed)
+
+    located = [n for n in notes if "located" in n[3]]
+    cased = [n for n in notes if "cased" in n[3]]
+    if located:
+        print("  found %d file(s) in the bundle under their original folder - "
+              "check they are the right documents:" % len(located))
+        for pno, old_t, new_t, _ in located[:25]:
+            print("       p%-4d %s\n             -> %s" % (pno, old_t, new_t))
+    if cased:
+        print("  corrected the capitals on %d link(s) to match the file on disk"
+              % len(cased))
     print("  wrote %s" % os.path.basename(out))
-    print("  now re-check it:  %s \"%s\""
-          % (prog_name(), os.path.basename(out)))
+
+    if resolve:
+        still = unresolved(out)
+        if still:
+            print("")
+            print("  !! %d link(s) still point at a file that is not there. "
+                  "--fix cannot supply a" % len(still))
+            print("     missing document - put it in place, or correct the "
+                  "link in the Word file:")
+            for pno, tgt in still[:25]:
+                print("       p%-4d %s" % (pno, tgt))
+            if len(still) > 25:
+                print("       ... and %d more" % (len(still) - 25))
+    if not getattr(args, "brief", False):
+        print("  now re-check it:  %s \"%s\""
+              % (prog_name(), os.path.basename(out)))
     return changed
+
+
+def unresolved(path):
+    """[(page, target)] for every local link in `path` that does not resolve."""
+    base_dir = os.path.dirname(os.path.abspath(path)) or os.getcwd()
+    doc = fitz.open(path)
+    out = []
+    for page in doc:
+        for link in read_links(doc, page):
+            target = link["target"]
+            if not target or WEB.match(target):
+                continue
+            if is_absolute(target):
+                out.append((link["page"], target))
+            elif resolve_target(target, base_dir)[0] != "found":
+                out.append((link["page"], target))
+    doc.close()
+    return out
 
 
 def prog_name():
@@ -556,6 +734,8 @@ def main(argv=None):
     ap.add_argument("--no-resolve", action="store_true",
                     help="do not check that each target actually exists next "
                          "to the PDF (use when the exhibits are not to hand)")
+    ap.add_argument("--brief", action="store_true",
+                    help=argparse.SUPPRESS)
     ap.add_argument("--no-pause", action="store_true",
                     help="do not wait for a keypress at the end (use this "
                          "when calling it from a batch file)")
@@ -586,6 +766,31 @@ def main(argv=None):
     return 1 if total_fail else 0
 
 
+def _ask_yes(question):
+    try:
+        return input("%s [y/N]: " % question).strip().lower().startswith("y")
+    except EOFError:
+        return False
+
+
+def _ask_choice(question, options):
+    """Numbered choice; Enter takes the first. Returns the chosen key."""
+    print("")
+    print(question)
+    for i, (_, label) in enumerate(options, 1):
+        print("  %d) %s" % (i, label))
+    while True:
+        try:
+            raw = input("Choice [1]: ").strip()
+        except EOFError:
+            return options[0][0]
+        if not raw:
+            return options[0][0]
+        if raw.isdigit() and 1 <= int(raw) <= len(options):
+            return options[int(raw) - 1][0]
+        print("  type a number from 1 to %d" % len(options))
+
+
 def interactive():
     """No arguments: ask for a path. This is what double-clicking gives you."""
     print("=" * 70)
@@ -607,15 +812,36 @@ def interactive():
             return 0
         print("")
         code = main([raw])
-        if code == 1:
-            try:
-                reply = input("\nRewrite the failing links as relative "
-                              "/GoToR? [y/N]: ").strip().lower()
-            except EOFError:
-                reply = ""
-            if reply.startswith("y"):
-                print("")
-                main([raw, "--fix"])
+        if code not in (0, 1):
+            continue
+        if not _ask_yes("\nRepair or change the links?"):
+            continue
+
+        open_in = _ask_choice(
+            "How should the links open?",
+            [("viewer", "in the PDF viewer          (recommended)"),
+             ("browser", "in the web browser"),
+             ("any", "leave the link types alone - only fix paths "
+                     "and capitals")])
+        window = "any"
+        if open_in != "browser":
+            window = _ask_choice(
+                "Should an exhibit open in its own window?",
+                [("new", "yes - never close the submission  (recommended)"),
+                 ("same", "no - replace the submission with the exhibit"),
+                 ("any", "leave it to each reader's own settings")])
+        print("")
+        main([raw, "--fix", "--open-in", open_in, "--window", window,
+              "--brief", "--no-pause"])
+
+        fixed = os.path.splitext(raw)[0] + "_fixed.pdf"
+        if os.path.isfile(raw) and os.path.isfile(fixed):
+            print("")
+            print("-" * 70)
+            print("THE FIXED FILE:")
+            print("-" * 70)
+            main([fixed, "--open-in", open_in, "--window", window,
+                  "--no-pause"])
 
 
 if __name__ == "__main__":

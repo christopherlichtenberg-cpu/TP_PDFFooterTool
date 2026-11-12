@@ -24,7 +24,7 @@ permissions:
   contents: write
 
 env:
-  VERSION: "1.3.0"
+  VERSION: "1.4.0"
 
 jobs:
   build:
@@ -128,7 +128,31 @@ jobs:
             }
           }
 
-          Write-Host "frozen build verified: detects, fixes, passes the fixed copy, and all three --open-in policies round-trip"
+          # The fixer must find a file Word recorded under the author's own
+          # path, correct capitals, and leave only the genuinely missing one.
+          New-Item -ItemType Directory -Force -Path demo | Out-Null
+          python -c "import sys; sys.path.insert(0, 'tests'); from test_pdflinkcheck import make_demo; make_demo('demo')"
+          & $exe demo\Submission.pdf --fix --no-pause | Out-Null
+          $out = & $exe demo\Submission_fixed.pdf --no-pause | Out-String
+          if ($out -notmatch "Documents/DOC-005\.pdf\s*$" -and $out -notmatch "Documents/DOC-005\.pdf") {
+            Write-Error "the fixer did not find DOC-005 in Documents"; exit 1
+          }
+          if ($out -notmatch "doc-006\.PDF") {
+            Write-Error "the fixer did not correct the capitals"; exit 1
+          }
+          if ($out -notmatch "MISSING\s+Documents/DOC-004\.pdf") {
+            Write-Error "the genuinely missing file was not reported"; exit 1
+          }
+
+          # The double-click flow, driven through stdin: browser, then Enter.
+          Remove-Item -Force demo\Submission_fixed.pdf
+          "demo\Submission.pdf`ny`n2`n`n`n" | & $exe | Out-Null
+          $out = & $exe demo\Submission_fixed.pdf --open-in browser --window any --no-pause | Out-String
+          if ($out -match "PDF viewer\s") {
+            Write-Error "the guided flow did not convert the links to the browser"; exit 1
+          }
+
+          Write-Host "frozen build verified: detects, fixes, finds files, corrects capitals, reports what is missing, and the guided flow converts link types"
           exit 0
 
       - name: Stage the package

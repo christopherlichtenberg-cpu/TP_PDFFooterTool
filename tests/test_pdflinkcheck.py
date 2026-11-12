@@ -403,6 +403,161 @@ def test_new_window(work):
           P.main([same_fixed, "--no-pause"]) == 1)
 
 
+def blank(path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    doc = fitz.open(); doc.new_page(); doc.save(path); doc.close()
+
+
+def test_locate(work):
+    section("finding an absolute target's file inside the bundle")
+    room = os.path.join(work, "locate")
+    blank(os.path.join(room, "Documents", "DOC-005.pdf"))
+    blank(os.path.join(room, "Archive", "DOC-009.pdf"))
+    blank(os.path.join(room, "Documents", "doc-007.PDF"))
+
+    got = P.locate_in_bundle(
+        "file:///C:/Users/someone/Matter/Documents/DOC-005.pdf", room)
+    check("found under its original folder", got == "Documents/DOC-005.pdf",
+          got)
+
+    got = P.locate_in_bundle(
+        "file:///C:/Users/someone/Matter/Documents/DOC-009.pdf", room)
+    check("an Archive copy of the same name is NOT picked up", got is None, got)
+
+    got = P.locate_in_bundle("D:/Elsewhere/Documents/DOC-007.pdf", room)
+    check("located with its on-disk capitals", got == "Documents/doc-007.PDF",
+          got)
+
+    check("nothing there -> None",
+          P.locate_in_bundle("C:/x/Documents/DOC-999.pdf", room) is None)
+
+
+def test_repair_target(work):
+    section("repair_target says what it did")
+    room = os.path.join(work, "locate")
+    rel, how = P.repair_target(
+        "file:///C:/Users/someone/Matter/Documents/DOC-005.pdf", room)
+    check("absolute -> located", rel == "Documents/DOC-005.pdf"
+          and {"relative", "located"} <= how, (rel, how))
+
+    rel, how = P.repair_target("Documents/DOC-007.pdf", room)
+    check("wrong capitals -> corrected", rel == "Documents/doc-007.PDF"
+          and "cased" in how, (rel, how))
+
+    rel, how = P.repair_target("C:/x/y/Gone.pdf", room)
+    check("absolute and nowhere -> flagged as a guess",
+          rel == "Gone.pdf" and "guessed" in how, (rel, how))
+
+    rel, how = P.repair_target("Documents/DOC-005.pdf", room)
+    check("already right -> untouched", rel == "Documents/DOC-005.pdf"
+          and not how, (rel, how))
+
+    rel, how = P.repair_target("./Documents/DOC-005.pdf", room)
+    check("leading ./ dropped", rel == "Documents/DOC-005.pdf", rel)
+
+
+def make_demo(room):
+    """The bundle from the November walkthrough: every flavour at once."""
+    os.makedirs(os.path.join(room, "Documents"), exist_ok=True)
+    pdf = os.path.join(room, "Submission.pdf")
+    doc = fitz.open()
+    doc.new_page(width=210 * MM, height=297 * MM)
+    page = doc[0]
+    box = lambda y: fitz.Rect(25 * MM, y * MM, 120 * MM, (y + 6) * MM)
+    page.insert_link({"kind": fitz.LINK_GOTOR, "from": box(40),
+                      "file": "Documents/DOC-001.pdf", "page": 0,
+                      "to": fitz.Point(0, 0)})
+    page.insert_link({"kind": fitz.LINK_LAUNCH, "from": box(50),
+                      "file": "Documents/DOC-003.pdf"})
+    page.insert_link({"kind": fitz.LINK_URI, "from": box(60),
+                      "uri": "Documents/DOC-004.pdf"})
+    page.insert_link({"kind": fitz.LINK_URI, "from": box(70),
+                      "uri": "file:///C:/Users/someone/Matter/Documents/"
+                             "DOC-005.pdf"})
+    page.insert_link({"kind": fitz.LINK_GOTOR, "from": box(80),
+                      "file": "Documents/DOC-006.pdf", "page": 0,
+                      "to": fitz.Point(0, 0)})
+    doc.save(pdf); doc.close()
+    for name in ("DOC-001.pdf", "DOC-003.pdf", "DOC-005.pdf", "doc-006.PDF"):
+        blank(os.path.join(room, "Documents", name))
+    return pdf
+
+
+def test_fix_finds_files(work):
+    section("--fix finds files and corrects capitals, and says what is left")
+    room = os.path.join(work, "demo")
+    pdf = make_demo(room)
+    P.main([pdf, "--fix", "--no-pause"])
+    fixed = os.path.join(room, "Submission_fixed.pdf")
+    targets = [t for a, t in actions_of(fixed)]
+    check("the absolute link now points into Documents/",
+          "Documents/DOC-005.pdf" in targets, targets)
+    check("the miscased link uses the on-disk spelling",
+          "Documents/doc-006.PDF" in targets, targets)
+    check("no bare-filename guess was left behind",
+          "DOC-005.pdf" not in targets, targets)
+    still = P.unresolved(fixed)
+    check("exactly the genuinely missing file is reported",
+          [t for _, t in still] == ["Documents/DOC-004.pdf"], still)
+
+
+def test_inventory(work):
+    section("the report says what each link IS")
+    room = os.path.join(work, "demo")
+    pdf = os.path.join(room, "Submission.pdf")
+    import contextlib, io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        P.main([pdf, "--no-pause"])
+    out = buf.getvalue()
+    for word in ("OPENS IN", "WINDOW", "PATH", "FILE", "PDF viewer",
+                 "default app", "browser", "reader decides", "ABSOLUTE",
+                 "MISSING", "wrong case", "found"):
+        check("report shows %r" % word, word in out)
+    rows = [l for l in out.splitlines() if l.strip().startswith(("ok", "FAIL",
+                                                                   "warn"))
+            and " p1 " in l]
+    tops = [l.split()[-1] for l in rows]
+    check("rows read top to bottom", tops[:2] == ["Documents/DOC-001.pdf",
+                                                  "Documents/DOC-003.pdf"],
+          tops)
+
+
+def test_guided_flow(work):
+    section("double-click flow: choose the link type and window")
+    import builtins, contextlib, io
+    room = os.path.join(work, "guided")
+    pdf = make_demo(room)
+
+    def drive(answers):
+        it = iter(answers)
+        real = builtins.input
+        builtins.input = lambda prompt="": next(it)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                P.interactive()
+        finally:
+            builtins.input = real
+
+    drive([pdf, "y", "2", ""])                 # browser
+    fixed = os.path.join(room, "Submission_fixed.pdf")
+    acts = set(a for a, t in actions_of(fixed) if not t.startswith("http"))
+    check("choosing 'browser' made every link /URI", acts == {"/URI"}, acts)
+
+    os.remove(fixed)
+    drive([pdf, "y", "1", "1", ""])            # viewer, new window
+    acts = set(a for a, t in actions_of(fixed))
+    check("choosing 'PDF viewer' made every link /GoToR", acts == {"/GoToR"},
+          acts)
+    check("...and pinned a new window",
+          all(v is True for v in window_flags(fixed).values()),
+          window_flags(fixed))
+
+    os.remove(fixed)
+    drive([pdf, "n", ""])                      # look only
+    check("declining changes nothing", not os.path.exists(fixed))
+
+
 def main():
     print("PDFLinkCheck %s tests" % P.VERSION)
     work = tempfile.mkdtemp(prefix="pdflinkcheck_tests_")
@@ -416,6 +571,11 @@ def main():
         test_resolution(work)
         test_open_in(work)
         test_new_window(work)
+        test_locate(work)
+        test_repair_target(work)
+        test_fix_finds_files(work)
+        test_inventory(work)
+        test_guided_flow(work)
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
